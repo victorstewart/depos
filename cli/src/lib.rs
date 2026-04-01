@@ -176,6 +176,9 @@ pub struct TargetSpec {
     pub shared_path: Option<PathBuf>,
     pub object_path: Option<PathBuf>,
     pub link_libraries: Vec<String>,
+    pub compile_definitions: Vec<String>,
+    pub compile_options: Vec<String>,
+    pub compile_features: Vec<String>,
 }
 
 impl TargetSpec {
@@ -188,6 +191,9 @@ impl TargetSpec {
             shared_path: None,
             object_path: None,
             link_libraries: Vec::new(),
+            compile_definitions: Vec::new(),
+            compile_options: Vec::new(),
+            compile_features: Vec::new(),
         }
     }
 
@@ -271,6 +277,7 @@ pub struct PackageSpec {
     pub name: String,
     pub namespace: String,
     pub version: String,
+    pub primary_target_name: Option<String>,
     pub source_subdir: Option<PathBuf>,
     pub lazy: bool,
     pub system_libs: PackageSystemLibs,
@@ -301,8 +308,16 @@ impl PackageSpec {
         PackageKey::new(&self.name, &self.namespace)
     }
 
+    fn primary_target_index(&self) -> Option<usize> {
+        match &self.primary_target_name {
+            Some(name) => self.targets.iter().position(|target| target.name == *name),
+            None => (!self.targets.is_empty()).then_some(0),
+        }
+    }
+
     fn primary_target(&self) -> Option<&str> {
-        self.targets.first().map(|target| target.name.as_str())
+        self.primary_target_index()
+            .map(|index| self.targets[index].name.as_str())
     }
 
     fn required_paths(&self) -> Vec<PathBuf> {
@@ -1497,7 +1512,7 @@ fn execute_command_phase(
         if argv.is_empty() {
             bail!("{} command array must not be empty", phase_name);
         }
-        let resolved_executable = resolve_runtime_executable_for_spec(context.spec, &argv[0])?;
+        let resolved_executable = resolve_phase_executable_for_spec(context.spec, cwd, &argv[0])?;
         log.push_str(&format!(
             "run {} in {}: {}\n",
             phase_name,
@@ -1521,6 +1536,38 @@ fn execute_command_phase(
         )?;
     }
     Ok(())
+}
+
+fn resolve_phase_executable_for_spec(
+    spec: &PackageSpec,
+    cwd: &str,
+    executable: &str,
+) -> Result<String> {
+    let path = Path::new(executable);
+    if path.is_absolute() || !executable.contains('/') {
+        return resolve_runtime_executable_for_spec(spec, executable);
+    }
+
+    let cwd_path = Path::new(cwd);
+    if !cwd_path.is_absolute() {
+        bail!("phase cwd must be absolute: {}", cwd);
+    }
+
+    let mut resolved = PathBuf::from(cwd_path);
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => resolved.push(part),
+            Component::ParentDir => {
+                bail!(
+                    "relative phase executable must not contain '..': {}",
+                    executable
+                )
+            }
+            Component::RootDir | Component::Prefix(_) => unreachable!(),
+        }
+    }
+    Ok(resolved.display().to_string())
 }
 
 fn expand_trusted_direct_command_substitutions(value: &str) -> Result<String> {
@@ -3147,12 +3194,16 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
     let mut name: Option<String> = None;
     let namespace = default_namespace();
     let mut version: Option<String> = None;
+    let mut primary_target_name: Option<String> = None;
     let mut source_subdir: Option<PathBuf> = None;
     let mut lazy = false;
     let mut system_libs = PackageSystemLibs::Inherit;
     let mut artifacts = Vec::new();
     let mut targets = Vec::new();
     let mut pending_target_links = BTreeMap::<String, Vec<String>>::new();
+    let mut pending_target_definitions = BTreeMap::<String, Vec<String>>::new();
+    let mut pending_target_options = BTreeMap::<String, Vec<String>>::new();
+    let mut pending_target_features = BTreeMap::<String, Vec<String>>::new();
     let mut depends = Vec::new();
     let mut fetch: Option<FetchSpec> = None;
     let mut configure = Vec::new();
@@ -3279,6 +3330,17 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
             "TARGET" => {
                 parse_target_line(path, line_number, remainder, &mut targets)?;
             }
+            "PRIMARY_TARGET" => {
+                let value = expect_single_token(path, line_number, keyword, remainder)?;
+                if primary_target_name.is_some() {
+                    bail!(
+                        "{}:{}: PRIMARY_TARGET is already set",
+                        path.display(),
+                        line_number
+                    );
+                }
+                primary_target_name = Some(value);
+            }
             "LINK" => {
                 let parts = tokenize_arguments(remainder)?;
                 if parts.len() < 2 {
@@ -3292,6 +3354,33 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
                     .entry(parts[0].clone())
                     .or_default()
                     .extend(parts[1..].iter().cloned());
+            }
+            "DEFINES" => {
+                parse_target_values_directive(
+                    path,
+                    line_number,
+                    keyword,
+                    remainder,
+                    &mut pending_target_definitions,
+                )?;
+            }
+            "OPTIONS" => {
+                parse_target_values_directive(
+                    path,
+                    line_number,
+                    keyword,
+                    remainder,
+                    &mut pending_target_options,
+                )?;
+            }
+            "FEATURES" => {
+                parse_target_values_directive(
+                    path,
+                    line_number,
+                    keyword,
+                    remainder,
+                    &mut pending_target_features,
+                )?;
             }
             "SHA256" => {
                 let value = expect_single_token(path, line_number, keyword, remainder)?;
@@ -4007,6 +4096,15 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
         if let Some(link_libraries) = pending_target_links.remove(&target.name) {
             target.link_libraries = dedup_strings(link_libraries);
         }
+        if let Some(compile_definitions) = pending_target_definitions.remove(&target.name) {
+            target.compile_definitions = dedup_strings(compile_definitions);
+        }
+        if let Some(compile_options) = pending_target_options.remove(&target.name) {
+            target.compile_options = dedup_strings(compile_options);
+        }
+        if let Some(compile_features) = pending_target_features.remove(&target.name) {
+            target.compile_features = dedup_strings(compile_features);
+        }
         if !target.interface_declared
             && target.static_path.is_none()
             && target.shared_path.is_none()
@@ -4020,9 +4118,39 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
             );
         }
     }
+    if let Some(primary_target) = &primary_target_name {
+        if !targets.iter().any(|target| target.name == *primary_target) {
+            bail!(
+                "DepoFile {} declares PRIMARY_TARGET '{}' but no TARGET with that name exists",
+                path.display(),
+                primary_target
+            );
+        }
+    }
     if let Some((target_name, _)) = pending_target_links.into_iter().next() {
         bail!(
             "DepoFile {} declares LINK for unknown target '{}'",
+            path.display(),
+            target_name
+        );
+    }
+    if let Some((target_name, _)) = pending_target_definitions.into_iter().next() {
+        bail!(
+            "DepoFile {} declares DEFINES for unknown target '{}'",
+            path.display(),
+            target_name
+        );
+    }
+    if let Some((target_name, _)) = pending_target_options.into_iter().next() {
+        bail!(
+            "DepoFile {} declares OPTIONS for unknown target '{}'",
+            path.display(),
+            target_name
+        );
+    }
+    if let Some((target_name, _)) = pending_target_features.into_iter().next() {
+        bail!(
+            "DepoFile {} declares FEATURES for unknown target '{}'",
             path.display(),
             target_name
         );
@@ -4038,6 +4166,7 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
         name,
         namespace,
         version,
+        primary_target_name,
         source_subdir,
         lazy,
         system_libs,
@@ -4108,6 +4237,7 @@ fn builtin_catalog() -> Vec<PackageSpec> {
             name: "bitsery".to_string(),
             namespace: default_namespace(),
             version: "5.2.3".to_string(),
+            primary_target_name: None,
             source_subdir: None,
             lazy: false,
             system_libs: PackageSystemLibs::Never,
@@ -4120,6 +4250,9 @@ fn builtin_catalog() -> Vec<PackageSpec> {
                 shared_path: None,
                 object_path: None,
                 link_libraries: Vec::new(),
+                compile_definitions: Vec::new(),
+                compile_options: Vec::new(),
+                compile_features: Vec::new(),
             }],
             depends: Vec::new(),
             fetch: None,
@@ -4140,6 +4273,7 @@ fn builtin_catalog() -> Vec<PackageSpec> {
             name: "itoa".to_string(),
             namespace: default_namespace(),
             version: "main".to_string(),
+            primary_target_name: None,
             source_subdir: None,
             lazy: false,
             system_libs: PackageSystemLibs::Never,
@@ -4152,6 +4286,9 @@ fn builtin_catalog() -> Vec<PackageSpec> {
                 shared_path: None,
                 object_path: None,
                 link_libraries: Vec::new(),
+                compile_definitions: Vec::new(),
+                compile_options: Vec::new(),
+                compile_features: Vec::new(),
             }],
             depends: Vec::new(),
             fetch: None,
@@ -4172,6 +4309,7 @@ fn builtin_catalog() -> Vec<PackageSpec> {
             name: "zlib".to_string(),
             namespace: default_namespace(),
             version: "1.3.2".to_string(),
+            primary_target_name: None,
             source_subdir: None,
             lazy: false,
             system_libs: PackageSystemLibs::Never,
@@ -4184,6 +4322,9 @@ fn builtin_catalog() -> Vec<PackageSpec> {
                 shared_path: None,
                 object_path: None,
                 link_libraries: Vec::new(),
+                compile_definitions: Vec::new(),
+                compile_options: Vec::new(),
+                compile_features: Vec::new(),
             }],
             depends: Vec::new(),
             fetch: None,
@@ -4748,6 +4889,24 @@ fn render_targets_cmake(
                     cmake_escape(&interface_links.join(";"))
                 ));
             }
+            if !target.compile_definitions.is_empty() {
+                interface_properties.push(format!(
+                    "INTERFACE_COMPILE_DEFINITIONS \"{}\"",
+                    cmake_escape(&target.compile_definitions.join(";"))
+                ));
+            }
+            if !target.compile_options.is_empty() {
+                interface_properties.push(format!(
+                    "INTERFACE_COMPILE_OPTIONS \"{}\"",
+                    cmake_escape(&target.compile_options.join(";"))
+                ));
+            }
+            if !target.compile_features.is_empty() {
+                interface_properties.push(format!(
+                    "INTERFACE_COMPILE_FEATURES \"{}\"",
+                    cmake_escape(&target.compile_features.join(";"))
+                ));
+            }
             if !interface_properties.is_empty() {
                 output.push_str(&format!(
                     "  set_target_properties({} PROPERTIES\n",
@@ -4943,9 +5102,13 @@ fn dependency_primary_targets(selected: &[ResolvedPackage]) -> BTreeMap<PackageK
     let mut map = BTreeMap::new();
     for package in selected {
         if package.spec.primary_target().is_some() {
+            let primary_index = package
+                .spec
+                .primary_target_index()
+                .expect("primary_target checked");
             map.insert(
                 package.spec.identity_key(),
-                internal_target_name(package, 0),
+                internal_target_name(package, primary_index),
             );
         }
     }
@@ -5881,6 +6044,29 @@ fn parse_target_line(
         }
         index += 1;
     }
+    Ok(())
+}
+
+fn parse_target_values_directive(
+    path: &Path,
+    line_number: usize,
+    keyword: &str,
+    remainder: &str,
+    pending: &mut BTreeMap<String, Vec<String>>,
+) -> Result<()> {
+    let parts = tokenize_arguments(remainder)?;
+    if parts.len() < 2 {
+        bail!(
+            "{}:{}: {} requires '<target> <value>...'",
+            path.display(),
+            line_number,
+            keyword
+        );
+    }
+    pending
+        .entry(parts[0].clone())
+        .or_default()
+        .extend(parts[1..].iter().cloned());
     Ok(())
 }
 

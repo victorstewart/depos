@@ -67,6 +67,68 @@ depos_require(zlib VERSION 1.3.2)
 depos_require(openssl VERSION 3.4.1)
 ```
 
+## Why Isolated Build Roots Matter
+
+The strongest utility `depos` provides is not just downloading dependencies. It is the ability to build packages in an isolated root so the build cannot silently reach into the host machine's `/usr` and `/lib` trees unless you deliberately expose them.
+
+The clean mental model is:
+
+- `BUILD_ROOT SYSTEM` is the convenience mode. The host filesystem is still available to the build.
+- `BUILD_ROOT SCRATCH` is the minimal hermetic mode. You must declare the toolchain inputs you want mounted into the build root.
+- `BUILD_ROOT OCI ...` gives you a curated hermetic root filesystem for the same reason.
+
+In practice, this is how you prevent "it built on my machine because it found some random system OpenSSL/zlib/libcurl" from becoming part of the build story.
+
+## Example: Ambient OpenSSL Leakage
+
+Suppose an upstream dependency contains this in its own build scripts:
+
+```cmake
+find_package(OpenSSL REQUIRED)
+target_link_libraries(upstream PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+```
+
+And suppose your Depo graph already declares a specific OpenSSL package version that the rest of the program is supposed to use.
+
+With `BUILD_ROOT SYSTEM`, that upstream package can still accidentally resolve the host copy from `/usr/lib` or `/usr/local`, because those locations exist in the build environment. Even if that was not your intent, the build may appear to work.
+
+With `BUILD_ROOT SCRATCH`, the same package only sees:
+
+- the fetched source tree
+- the Depo dependency roots
+- the explicit `TOOLCHAIN_INPUT` mounts you declared
+
+If OpenSSL is not provided through Depo or an explicit toolchain/sysroot input, the build fails instead of silently drifting onto the host system copy. That failure is useful. It turns an implicit host dependency into an explicit packaging problem you can fix.
+
+A minimal scratch-oriented package shape looks like this:
+
+```text
+NAME example_tls_dep
+VERSION 1.0.0
+BUILD_ROOT SCRATCH
+TOOLCHAIN_INPUT /bin/sh
+TOOLCHAIN_INPUT /usr/bin/install
+TOOLCHAIN_INPUT /usr/lib
+TOOLCHAIN_INPUT /lib
+TOOLCHAIN_INPUT /lib64
+DEPENDS openssl VERSION 3.4.1
+SOURCE GIT https://example.com/example_tls_dep.git 0123456789abcdef0123456789abcdef01234567
+BUILD_SYSTEM MANUAL
+MANUAL_INSTALL_SH <<'EOF'
+install -D "${DEPO_SOURCE_DIR}/include/example_tls_dep.h" \
+  "${DEPO_PREFIX}/include/example_tls_dep/example_tls_dep.h"
+EOF
+TARGET example_tls_dep::example_tls_dep INTERFACE include
+```
+
+The important property is not the exact package above. The important property is that every host path visible inside the build is deliberate.
+
+Using isolated build roots gives you three practical wins:
+
+- reproducibility: a package cannot succeed just because your workstation happens to have extra libraries installed
+- conflict detection: missing or conflicting subdependencies fail early instead of being "fixed" by ambient host libraries
+- packaging discipline: if a dependency needs a library, the right answer is to declare it in a DepoFile and propagate it through exported targets
+
 ## Example `DepoFile`s
 
 Simple package:
@@ -74,10 +136,9 @@ Simple package:
 ```text
 NAME openssl
 VERSION 3.4.1
-SYSTEM_LIBS ALLOW
 SOURCE URL https://github.com/openssl/openssl/archive/refs/tags/openssl-3.4.1.tar.gz
 BUILD_SYSTEM AUTOCONF
-AUTOCONF_CONFIGURE ./Configure "linux-${DEPO_TARGET_ARCH}" --prefix="${DEPO_PREFIX}" --libdir=lib --openssldir=/usr/local/ssl no-quic no-tests no-docs no-shared
+AUTOCONF_CONFIGURE ./Configure "linux-${DEPO_TARGET_ARCH}" --prefix="${DEPO_PREFIX}" --libdir=lib --openssldir="${DEPO_PREFIX}/ssl" no-quic no-tests no-docs no-shared
 AUTOCONF_BUILD make -j$(nproc) libcrypto.a libssl.a
 AUTOCONF_INSTALL make install_dev DESTDIR=
 TARGET openssl INTERFACE include
@@ -101,7 +162,6 @@ Build an Ubuntu 22.04 `aarch64` OpenSSL package from `x86_64` CI:
 ```text
 NAME openssl_ubuntu_2204_aarch64
 VERSION 3.4.1
-SYSTEM_LIBS NEVER
 
 # Assume the host already provides an aarch64 GNU cross toolchain.
 # The build runs inside Ubuntu 22.04; the host only contributes the mounted toolchain.
@@ -117,7 +177,7 @@ TOOLCHAIN_INPUT /lib64
 SOURCE URL https://github.com/openssl/openssl/archive/refs/tags/openssl-3.4.1.tar.gz
 
 BUILD_SYSTEM AUTOCONF
-AUTOCONF_CONFIGURE env CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib STRIP=aarch64-linux-gnu-strip ./Configure linux-aarch64 --prefix="${DEPO_PREFIX}" --libdir=lib --openssldir=/usr/local/ssl no-quic no-tests no-docs no-shared
+AUTOCONF_CONFIGURE env CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib STRIP=aarch64-linux-gnu-strip ./Configure linux-aarch64 --prefix="${DEPO_PREFIX}" --libdir=lib --openssldir="${DEPO_PREFIX}/ssl" no-quic no-tests no-docs no-shared
 AUTOCONF_BUILD make -j$(nproc) libcrypto.a libssl.a
 AUTOCONF_INSTALL make install_dev DESTDIR=
 

@@ -40,10 +40,9 @@ Example `DepoFile`:
 ```text
 NAME openssl
 VERSION 3.4.1
-SYSTEM_LIBS ALLOW
 SOURCE URL https://github.com/openssl/openssl/archive/refs/tags/openssl-3.4.1.tar.gz
 BUILD_SYSTEM AUTOCONF
-AUTOCONF_CONFIGURE ./Configure "linux-${DEPO_TARGET_ARCH}" --prefix="${DEPO_PREFIX}" --libdir=lib --openssldir=/usr/local/ssl no-quic no-tests no-docs no-shared
+AUTOCONF_CONFIGURE ./Configure "linux-${DEPO_TARGET_ARCH}" --prefix="${DEPO_PREFIX}" --libdir=lib --openssldir="${DEPO_PREFIX}/ssl" no-quic no-tests no-docs no-shared
 AUTOCONF_BUILD make -j$(nproc) libcrypto.a libssl.a
 AUTOCONF_INSTALL make install_dev DESTDIR=
 TARGET openssl INTERFACE include

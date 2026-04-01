@@ -52,6 +52,70 @@ fn sync_generates_registry_for_materialized_packages() {
 }
 
 #[test]
+fn sync_emits_interface_metadata_and_honors_primary_target() {
+    let sandbox = Sandbox::new();
+    let provider_repo = sandbox.create_git_repo(
+        "repos/provider",
+        &[
+            ("include/provider/provider.h", "// provider\n"),
+            ("lib/libprovider.a", "archive\n"),
+        ],
+    );
+    let consumer_repo = sandbox.create_git_repo(
+        "repos/consumer",
+        &[("include/consumer/consumer.h", "// consumer\n")],
+    );
+    sandbox.write(
+        "tmp/provider.DepoFile",
+        &format!(
+            "NAME provider\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nPRIMARY_TARGET provider::runtime\nTARGET provider::headers INTERFACE include\nDEFINES provider::headers PROVIDER_HEADER_ONLY=1 PAGE_SIZE=4096\nOPTIONS provider::headers -Winvalid-pch\nFEATURES provider::headers cxx_std_20\nTARGET provider::runtime STATIC lib/libprovider.a\n",
+            provider_repo.display()
+        ),
+    );
+    sandbox.write(
+        "tmp/consumer.DepoFile",
+        &format!(
+            "NAME consumer\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nDEPENDS provider VERSION 1.0.0\nTARGET consumer::consumer INTERFACE include\n",
+            consumer_repo.display()
+        ),
+    );
+    sandbox.write(
+        "manifests/consumer.cmake",
+        "depos_require(consumer VERSION 1.0.0)\n",
+    );
+
+    register_depofile(&RegisterOptions {
+        depos_root: sandbox.depos_root(),
+        file: sandbox.depos_root().join("tmp/provider.DepoFile"),
+        namespace: RELEASE_NAMESPACE.to_string(),
+    })
+    .expect("register provider");
+    register_depofile(&RegisterOptions {
+        depos_root: sandbox.depos_root(),
+        file: sandbox.depos_root().join("tmp/consumer.DepoFile"),
+        namespace: RELEASE_NAMESPACE.to_string(),
+    })
+    .expect("register consumer");
+
+    let output = sync_registry(&SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox.depos_root().join("manifests/consumer.cmake"),
+        system_libs: Some(GlobalSystemLibs::Never),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    })
+    .expect("sync should succeed");
+
+    let targets = fs::read_to_string(output.targets_file).expect("targets.cmake should exist");
+    assert!(
+        targets.contains("INTERFACE_COMPILE_DEFINITIONS \"PROVIDER_HEADER_ONLY=1;PAGE_SIZE=4096\"")
+    );
+    assert!(targets.contains("INTERFACE_COMPILE_OPTIONS \"-Winvalid-pch\""));
+    assert!(targets.contains("INTERFACE_COMPILE_FEATURES \"cxx_std_20\""));
+    assert!(targets.contains("INTERFACE_LINK_LIBRARIES \"_depos_provider_release_1_0_0_t1\""));
+    assert!(!targets.contains("INTERFACE_LINK_LIBRARIES \"_depos_provider_release_1_0_0_t0\"\n"));
+}
+
+#[test]
 fn register_refreshes_green_status_and_unregister_cleans_up() {
     let sandbox = Sandbox::new();
     let variant = default_variant();
@@ -377,6 +441,62 @@ fn depofile_merges_target_facets_across_lines_and_rejects_duplicate_artifacts() 
         spec.targets[0].include_dirs,
         vec![PathBuf::from("include"), PathBuf::from("generated/include")]
     );
+}
+
+#[test]
+fn depofile_parses_primary_target_and_target_interface_metadata() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "tmp/interface_metadata.DepoFile",
+        "NAME interface_metadata\nVERSION 1.0.0\nPRIMARY_TARGET interface_metadata::runtime\nTARGET interface_metadata::headers INTERFACE include\nDEFINES interface_metadata::headers BASICS_DEBUG=0 PAGE_SIZE=4096\nDEFINES interface_metadata::headers nametag_log=basics_log\nOPTIONS interface_metadata::headers -Winvalid-pch\nFEATURES interface_metadata::headers cxx_std_20\nTARGET interface_metadata::runtime STATIC lib/libinterface_metadata.a\n",
+    );
+    let spec = parse_depofile(&sandbox.depos_root().join("tmp/interface_metadata.DepoFile"))
+        .expect("primary target and interface metadata should parse");
+    assert_eq!(
+        spec.primary_target_name.as_deref(),
+        Some("interface_metadata::runtime")
+    );
+    assert_eq!(spec.targets.len(), 2);
+    assert_eq!(
+        spec.targets[0].compile_definitions,
+        vec![
+            "BASICS_DEBUG=0".to_string(),
+            "PAGE_SIZE=4096".to_string(),
+            "nametag_log=basics_log".to_string()
+        ]
+    );
+    assert_eq!(
+        spec.targets[0].compile_options,
+        vec!["-Winvalid-pch".to_string()]
+    );
+    assert_eq!(
+        spec.targets[0].compile_features,
+        vec!["cxx_std_20".to_string()]
+    );
+
+    sandbox.write(
+        "tmp/unknown_target_defines.DepoFile",
+        "NAME unknown_target_defines\nVERSION 1.0.0\nDEFINES unknown_target_defines::missing FOO=1\nTARGET unknown_target_defines::known INTERFACE include\n",
+    );
+    let error = parse_depofile(
+        &sandbox
+            .depos_root()
+            .join("tmp/unknown_target_defines.DepoFile"),
+    )
+    .expect_err("DEFINES should reject unknown target names");
+    assert!(format!("{error:#}").contains("declares DEFINES for unknown target"));
+
+    sandbox.write(
+        "tmp/repeated_primary_target.DepoFile",
+        "NAME repeated_primary_target\nVERSION 1.0.0\nPRIMARY_TARGET repeated_primary_target::one\nPRIMARY_TARGET repeated_primary_target::two\nTARGET repeated_primary_target::one INTERFACE include\nTARGET repeated_primary_target::two INTERFACE include\n",
+    );
+    let error = parse_depofile(
+        &sandbox
+            .depos_root()
+            .join("tmp/repeated_primary_target.DepoFile"),
+    )
+    .expect_err("PRIMARY_TARGET should reject repeat assignment");
+    assert!(format!("{error:#}").contains("PRIMARY_TARGET is already set"));
 }
 
 #[test]
@@ -894,6 +1014,158 @@ fn sync_materializes_autoconf_build_system_package() {
             RELEASE_NAMESPACE,
             "1.0.0",
             "lib/libautoconf_demo.a",
+        )
+        .exists());
+}
+
+#[test]
+fn sync_injects_pkg_config_libdir_for_autoconf_dependencies() {
+    let sandbox = Sandbox::new();
+    let dependency = sandbox.create_git_repo(
+        "upstreams/dependency_demo",
+        &[
+            ("include/dependency_demo/demo.h", "#pragma once\n"),
+            ("lib/libdependency_demo.a", "archive\n"),
+        ],
+    );
+    let upstream = sandbox
+        .depos_root()
+        .join("upstreams/autoconf_pkg_config_demo");
+    fs::create_dir_all(upstream.join("include/autoconf_pkg_config_demo"))
+        .expect("create pkg-config demo include dir");
+    sandbox.write(
+        "upstreams/autoconf_pkg_config_demo/configure",
+        "#!/bin/sh\nset -eu\nprefix=/usr/local\nlibdir=\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --prefix=*) prefix=${arg#*=} ;;\n    --libdir=*) libdir=${arg#*=} ;;\n  esac\ndone\n[ -n \"$libdir\" ] || libdir=\"$prefix/lib\"\ncat > config.mk <<EOF\nprefix=$prefix\nlibdir=$libdir\nEOF\n",
+    );
+    let mut perms = fs::metadata(upstream.join("configure"))
+        .expect("stat pkg-config demo configure")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(upstream.join("configure"), perms).expect("chmod pkg-config demo");
+    sandbox.write(
+        "upstreams/autoconf_pkg_config_demo/Makefile",
+        "include config.mk\n\nall:\n\tmkdir -p build\n\tprintf 'archive\\n' > build/libautoconf_pkg_config_demo.a\n\ninstall: all\n\tmkdir -p $(prefix)/include/autoconf_pkg_config_demo $(libdir)\n\tcp include/autoconf_pkg_config_demo/demo.h $(prefix)/include/autoconf_pkg_config_demo/demo.h\n\tcp build/libautoconf_pkg_config_demo.a $(libdir)/libautoconf_pkg_config_demo.a\n",
+    );
+    sandbox.write(
+        "upstreams/autoconf_pkg_config_demo/include/autoconf_pkg_config_demo/demo.h",
+        "#pragma once\n",
+    );
+    run_command(&upstream, ["git", "init", "--quiet"]);
+    run_command(
+        &upstream,
+        ["git", "config", "user.email", "codex@example.invalid"],
+    );
+    run_command(&upstream, ["git", "config", "user.name", "Codex"]);
+    run_command(&upstream, ["git", "add", "."]);
+    run_command(&upstream, ["git", "commit", "--quiet", "-m", "init"]);
+
+    sandbox.write(
+        "depofiles/local/dependency_demo/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME dependency_demo\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nTARGET dependency_demo::dependency_demo INTERFACE include\nARTIFACT lib/libdependency_demo.a\n",
+            dependency.display()
+        ),
+    );
+    sandbox.write(
+        "depofiles/local/autoconf_pkg_config_demo/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME autoconf_pkg_config_demo\nVERSION 1.0.0\nSYSTEM_LIBS ALLOW\nDEPENDS dependency_demo VERSION 1.0.0\nBUILD_SYSTEM AUTOCONF\nSOURCE GIT {} HEAD\nAUTOCONF_CONFIGURE_SH <<'EOF'\nexpected=\"/depos/dependency_demo/release/1.0.0/lib/pkgconfig:/depos/dependency_demo/release/1.0.0/lib64/pkgconfig\"\ntest \"$PKG_CONFIG_LIBDIR\" = \"$expected\"\n./configure --prefix=\"$DEPO_PREFIX\" --libdir=\"$DEPO_PREFIX/lib\"\nEOF\nTARGET autoconf_pkg_config_demo::autoconf_pkg_config_demo STATIC lib/libautoconf_pkg_config_demo.a INTERFACE include\n",
+            upstream.display()
+        ),
+    );
+    sandbox.write(
+        "manifests/autoconf_pkg_config_demo.cmake",
+        "depos_require(autoconf_pkg_config_demo VERSION 1.0.0)\n",
+    );
+
+    sync_registry(&SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/autoconf_pkg_config_demo.cmake"),
+        system_libs: Some(GlobalSystemLibs::Never),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    })
+    .expect("sync should inject dependency PKG_CONFIG_LIBDIR automatically");
+
+    assert!(sandbox
+        .package_store_path(
+            "autoconf_pkg_config_demo",
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            "include/autoconf_pkg_config_demo/demo.h",
+        )
+        .exists());
+}
+
+#[test]
+fn sync_materializes_autoconf_direct_configure_relative_executable_package() {
+    let sandbox = Sandbox::new();
+    let upstream = sandbox.depos_root().join("upstreams/autoconf_direct_demo");
+    fs::create_dir_all(upstream.join("include/autoconf_direct_demo"))
+        .expect("create autoconf direct include dir");
+    sandbox.write(
+        "upstreams/autoconf_direct_demo/configure",
+        "#!/bin/sh\nset -eu\nprefix=/usr/local\nlibdir=\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --prefix=*) prefix=${arg#*=} ;;\n    --libdir=*) libdir=${arg#*=} ;;\n  esac\ndone\n[ -n \"$libdir\" ] || libdir=\"$prefix/lib\"\ncat > config.mk <<EOF\nprefix=$prefix\nlibdir=$libdir\nEOF\n",
+    );
+    let mut perms = fs::metadata(upstream.join("configure"))
+        .expect("stat direct configure")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(upstream.join("configure"), perms).expect("chmod direct configure");
+    sandbox.write(
+        "upstreams/autoconf_direct_demo/Makefile",
+        "include config.mk\n\nall:\n\tmkdir -p build\n\tprintf 'archive\\n' > build/libautoconf_direct_demo.a\n\ninstall: all\n\tmkdir -p $(prefix)/include/autoconf_direct_demo $(libdir)\n\tcp include/autoconf_direct_demo/demo.h $(prefix)/include/autoconf_direct_demo/demo.h\n\tcp build/libautoconf_direct_demo.a $(libdir)/libautoconf_direct_demo.a\n",
+    );
+    sandbox.write(
+        "upstreams/autoconf_direct_demo/include/autoconf_direct_demo/demo.h",
+        "#pragma once\n",
+    );
+    run_command(&upstream, ["git", "init", "--quiet"]);
+    run_command(
+        &upstream,
+        ["git", "config", "user.email", "codex@example.invalid"],
+    );
+    run_command(&upstream, ["git", "config", "user.name", "Codex"]);
+    run_command(&upstream, ["git", "add", "."]);
+    run_command(&upstream, ["git", "commit", "--quiet", "-m", "init"]);
+
+    sandbox.write(
+        "depofiles/local/autoconf_direct_demo/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME autoconf_direct_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nBUILD_SYSTEM AUTOCONF\nSOURCE GIT {} HEAD\nAUTOCONF_CONFIGURE ./configure --prefix=\"${{DEPO_PREFIX}}\" --libdir=\"${{DEPO_PREFIX}}/lib\"\nTARGET autoconf_direct_demo::autoconf_direct_demo STATIC lib/libautoconf_direct_demo.a INTERFACE include\n",
+            upstream.display()
+        ),
+    );
+    sandbox.write(
+        "manifests/autoconf_direct_demo.cmake",
+        "depos_require(autoconf_direct_demo VERSION 1.0.0)\n",
+    );
+
+    sync_registry(&SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/autoconf_direct_demo.cmake"),
+        system_libs: Some(GlobalSystemLibs::Never),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    })
+    .expect("sync should materialize AUTOCONF_CONFIGURE ./configure package");
+
+    assert!(sandbox
+        .package_store_path(
+            "autoconf_direct_demo",
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            "include/autoconf_direct_demo/demo.h",
+        )
+        .exists());
+    assert!(sandbox
+        .package_store_path(
+            "autoconf_direct_demo",
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            "lib/libautoconf_direct_demo.a",
         )
         .exists());
 }
