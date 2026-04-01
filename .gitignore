@@ -1,0 +1,7 @@
+build/
+.run/
+.tasks/
+target/
+.cargo/
+.depos-home/
+depofiles/

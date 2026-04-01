@@ -1,0 +1,23 @@
+[package]
+name = "depos-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Shared dependency workspace CLI"
+authors = ["Victor Stewart"]
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/victorstewart/depos"
+homepage = "https://github.com/victorstewart/depos"
+
+[[bin]]
+name = "depos"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+metalor = "0.1.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.10"
