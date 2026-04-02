@@ -2516,7 +2516,7 @@ fn git_source_command_argument(url: &str) -> String {
     {
         let path = Path::new(url);
         if path.is_absolute() {
-            return path.display().to_string();
+            return display_path(path);
         }
     }
     url.to_string()
@@ -2554,11 +2554,7 @@ fn ensure_git_clone(url: &str, source_root: &Path, log: &mut String) -> Result<b
         log,
         None,
         "git",
-        vec![
-            "clone".to_string(),
-            clone_source,
-            source_root.display().to_string(),
-        ],
+        vec!["clone".to_string(), clone_source, display_path(source_root)],
         Some(source_root),
     )?;
     Ok(true)
@@ -2700,7 +2696,7 @@ fn git_output<const N: usize>(current_dir: &Path, argv: [&str; N]) -> Result<Opt
     let executable_path = resolve_command_path("git");
     let output = Command::new(&executable_path)
         .args(argv)
-        .current_dir(current_dir)
+        .current_dir(normalize_host_path(current_dir))
         .output()
         .with_context(|| format!("failed to spawn {}", executable_path.display()))?;
     if output.status.success() {
@@ -2722,7 +2718,7 @@ fn git_status_success<const N: usize>(current_dir: &Path, argv: [&str; N]) -> Re
     let executable_path = resolve_command_path("git");
     let status = Command::new(&executable_path)
         .args(argv)
-        .current_dir(current_dir)
+        .current_dir(normalize_host_path(current_dir))
         .status()
         .with_context(|| format!("failed to spawn {}", executable_path.display()))?;
     Ok(status.success())
@@ -3608,7 +3604,7 @@ where
     let mut command = Command::new(&executable_path);
     command.args(&args_vec);
     if let Some(dir) = current_dir {
-        command.current_dir(dir);
+        command.current_dir(normalize_host_path(dir));
     }
     let output = command.output().with_context(|| {
         format!(
