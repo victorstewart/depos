@@ -3526,7 +3526,9 @@ fn resolve_command_path(executable: &str) -> PathBuf {
 fn find_executable_in_path(executable: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     let mut windows_extensions = Vec::new();
-    if cfg!(windows) && Path::new(executable).extension().is_none() {
+    let needs_windows_extension_search =
+        cfg!(windows) && Path::new(executable).extension().is_none();
+    if needs_windows_extension_search {
         windows_extensions = std::env::var_os("PATHEXT")
             .map(|value| {
                 value
@@ -3546,15 +3548,17 @@ fn find_executable_in_path(executable: &str) -> Option<PathBuf> {
             });
     }
     for directory in std::env::split_paths(&path_var) {
-        let direct = directory.join(executable);
-        if direct.exists() {
-            return Some(direct);
-        }
-        for extension in &windows_extensions {
-            let candidate = directory.join(format!("{executable}{extension}"));
-            if candidate.exists() {
-                return Some(candidate);
+        if needs_windows_extension_search {
+            for extension in &windows_extensions {
+                let candidate = directory.join(format!("{executable}{extension}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
+        }
+        let direct = directory.join(executable);
+        if direct.is_file() {
+            return Some(direct);
         }
     }
     None

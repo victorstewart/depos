@@ -268,7 +268,8 @@ fn run_command<const N: usize>(current_dir: &Path, argv: [&str; N]) {
 
 fn resolve_tool(tool: &str) -> PathBuf {
     if let Some(path) = std::env::var_os("PATH").and_then(|value| {
-        let pathext = if cfg!(windows) {
+        let needs_windows_extension_search = cfg!(windows) && Path::new(tool).extension().is_none();
+        let pathext = if needs_windows_extension_search {
             std::env::var_os("PATHEXT")
                 .map(|value| {
                     value
@@ -290,17 +291,17 @@ fn resolve_tool(tool: &str) -> PathBuf {
             vec![String::new()]
         };
         std::env::split_paths(&value).find_map(|directory| {
-            let direct = directory.join(tool);
-            if direct.exists() {
-                return Some(direct);
-            }
-            if cfg!(windows) && Path::new(tool).extension().is_none() {
+            if needs_windows_extension_search {
                 for extension in &pathext {
                     let candidate = directory.join(format!("{tool}{extension}"));
-                    if candidate.exists() {
+                    if candidate.is_file() {
                         return Some(candidate);
                     }
                 }
+            }
+            let direct = directory.join(tool);
+            if direct.is_file() {
+                return Some(direct);
             }
             None
         })
