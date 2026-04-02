@@ -1,4 +1,4 @@
 NAME itoa
 VERSION main
-SOURCE URL https://github.com/jeaiii/itoa/archive/refs/heads/main.tar.gz
+SOURCE GIT https://github.com/jeaiii/itoa.git main
 TARGET itoa::itoa INTERFACE include

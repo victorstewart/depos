@@ -7,6 +7,7 @@ use depos::{host_arch, sync_registry, SyncOptions};
 use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tar::Builder;
 use tempfile::TempDir;
 
@@ -140,6 +141,48 @@ fn sync_builds_cmake_package_with_native_portable_backend() {
             RELEASE_NAMESPACE,
             "1.0.0",
             &artifact_store_path
+        )
+        .is_file());
+}
+
+#[test]
+fn sync_materializes_git_package_with_native_portable_backend() {
+    let sandbox = Sandbox::new();
+    let package_name = "portable_git_demo";
+    let upstream = sandbox.create_git_repo(
+        "upstreams/portable_git_demo",
+        &[("include/portable_git_demo/demo.h", "#pragma once\n")],
+    );
+    sandbox.write(
+        &format!(
+            "depofiles/local/{package_name}/{RELEASE_NAMESPACE}/1.0.0/main.DepoFile"
+        ),
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE GIT {} HEAD\nTARGET {package_name}::{package_name} INTERFACE include\n",
+            portable_path(&upstream)
+        ),
+    );
+    sandbox.write(
+        "manifests/portable_git_demo.cmake",
+        "depos_require(portable_git_demo VERSION 1.0.0)\n",
+    );
+
+    let output = sync_registry(&SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/portable_git_demo.cmake"),
+        executable: None,
+    })
+    .expect("sync should materialize portable native git package");
+
+    assert_eq!(output.selected.len(), 1);
+    assert!(sandbox
+        .package_store_path(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            "include/portable_git_demo/demo.h"
         )
         .is_file());
 }
@@ -350,4 +393,40 @@ impl Sandbox {
         builder.finish().expect("finish archive");
         archive_path
     }
+
+    fn create_git_repo(&self, relative: &str, files: &[(&str, &str)]) -> PathBuf {
+        let repo = self.root.path().join(relative);
+        fs::create_dir_all(&repo).expect("create repo");
+        for (path, contents) in files {
+            let file_path = repo.join(path);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent).expect("create repo parent");
+            }
+            fs::write(file_path, contents).expect("write repo file");
+        }
+        run_test_command(&repo, "git", ["init", "--quiet"]);
+        run_test_command(
+            &repo,
+            "git",
+            ["config", "user.email", "codex@example.invalid"],
+        );
+        run_test_command(&repo, "git", ["config", "user.name", "Codex"]);
+        run_test_command(&repo, "git", ["add", "."]);
+        run_test_command(&repo, "git", ["commit", "--quiet", "-m", "init"]);
+        repo
+    }
+}
+
+fn run_test_command<const N: usize>(current_dir: &Path, executable: &str, args: [&str; N]) {
+    let status = Command::new(executable)
+        .args(args)
+        .current_dir(current_dir)
+        .status()
+        .expect("spawn command");
+    assert!(
+        status.success(),
+        "command failed: {} {:?}",
+        executable,
+        args
+    );
 }

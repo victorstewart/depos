@@ -10,7 +10,7 @@ use depos::{
 };
 #[cfg(target_os = "linux")]
 use metalor::{run_isolated_container_command, BindMount, ContainerRunCommand};
-use std::path::PathBuf;
+use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Parser, Debug)]
 #[command(name = "depos")]
@@ -92,7 +92,17 @@ fn default_depos_root() -> PathBuf {
     default_depos_root_path()
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match real_main() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn real_main() -> Result<()> {
     let current_exe = std::env::current_exe()?;
     let cli = Cli::parse();
     match cli.command {

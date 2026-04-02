@@ -2362,6 +2362,18 @@ fn append_process_output(log: &mut String, stdout: &[u8], stderr: &[u8]) {
     }
 }
 
+fn append_process_failure_output(message: &mut String, label: &str, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let rendered = String::from_utf8_lossy(bytes);
+    let rendered = rendered.trim_end_matches(['\r', '\n']);
+    if rendered.is_empty() {
+        return;
+    }
+    message.push_str(&format!("\n{label}:\n{rendered}"));
+}
+
 #[cfg(target_os = "linux")]
 fn run_isolated_phase(
     executable: &Path,
@@ -3609,11 +3621,13 @@ where
     })?;
     append_process_output(log, &output.stdout, &output.stderr);
     if !output.status.success() {
-        bail!(
+        let mut message = format!(
             "command '{}' failed with status {}",
-            executable,
-            output.status
+            executable, output.status
         );
+        append_process_failure_output(&mut message, "stdout", &output.stdout);
+        append_process_failure_output(&mut message, "stderr", &output.stderr);
+        bail!("{message}");
     }
     Ok(())
 }
