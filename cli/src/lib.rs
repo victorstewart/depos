@@ -875,7 +875,7 @@ fn migrate_builtin_from_legacy(
             for relative_path in [
                 Path::new("include/zlib.h"),
                 Path::new("include/zconf.h"),
-                Path::new("lib/libz.a"),
+                Path::new(builtin_zlib_static_library_path()),
             ] {
                 copy_export_path(legacy_root, package_root, relative_path, false, &mut log)?;
             }
@@ -5486,7 +5486,7 @@ fn builtin_catalog() -> Vec<PackageSpec> {
                 name: "zlib::zlib".to_string(),
                 interface_declared: true,
                 include_dirs: vec![PathBuf::from("include")],
-                static_path: Some(PathBuf::from("lib/libz.a")),
+                static_path: Some(PathBuf::from(builtin_zlib_static_library_path())),
                 shared_path: None,
                 object_path: None,
                 link_libraries: Vec::new(),
@@ -5510,6 +5510,14 @@ fn builtin_catalog() -> Vec<PackageSpec> {
             origin: PackageOrigin::Builtin,
         },
     ]
+}
+
+fn builtin_zlib_static_library_path() -> &'static str {
+    if cfg!(windows) {
+        "lib/zs.lib"
+    } else {
+        "lib/libz.a"
+    }
 }
 
 fn load_local_depofiles(depos_root: &Path) -> Result<Vec<PackageSpec>> {

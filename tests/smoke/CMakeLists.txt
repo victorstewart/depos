@@ -11,6 +11,18 @@ endif()
 file(REMOVE_RECURSE "${DEPOS_ROOT}")
 file(MAKE_DIRECTORY "${DEPOS_ROOT}/depofiles")
 file(COPY "${CMAKE_CURRENT_LIST_DIR}/fixtures/local" DESTINATION "${DEPOS_ROOT}/depofiles")
+if (WIN32)
+  set(_depos_zlib_depofile "${DEPOS_ROOT}/depofiles/local/zlib/release/1.3.2/main.DepoFile")
+  file(READ "${_depos_zlib_depofile}" _depos_zlib_depofile_contents)
+  string(
+    REPLACE
+    "TARGET zlib::zlib STATIC lib/libz.a INTERFACE include"
+    "TARGET zlib::zlib STATIC lib/zs.lib INTERFACE include"
+    _depos_zlib_depofile_contents
+    "${_depos_zlib_depofile_contents}"
+  )
+  file(WRITE "${_depos_zlib_depofile}" "${_depos_zlib_depofile_contents}")
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/../../.depos.cmake")
 set(DEPOS_SMOKE_STYLE "all" CACHE STRING "Smoke style: all, explicit, or files")
