@@ -7,6 +7,10 @@ on:
       - multi-os
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -37,15 +41,20 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Rust tests (Unix)
-        if: runner.os != 'Windows'
+      - name: Rust tests (Linux)
+        if: runner.os == 'Linux'
         shell: bash
-        run: cargo test --locked --manifest-path cli/Cargo.toml
+        run: sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" test --locked --manifest-path cli/Cargo.toml -j"$(nproc)"
+
+      - name: Rust tests (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: cargo test --locked --manifest-path cli/Cargo.toml -j"$(sysctl -n hw.ncpu)"
 
       - name: Rust tests (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo test --locked --manifest-path cli/Cargo.toml
+        run: cargo test --locked --manifest-path cli/Cargo.toml -j $env:NUMBER_OF_PROCESSORS
 
       - name: Cargo fmt
         if: runner.os == 'Linux'
@@ -62,18 +71,26 @@ jobs:
         shell: bash
         run: ./tools/regenerate-local-depofiles.sh --check
 
-      - name: Repo CMake smoke (Unix)
-        if: runner.os != 'Windows'
+      - name: Repo CMake smoke (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          cmake --fresh -S . -B build/ci -DBUILD_TESTING=ON
-          cmake --build build/ci --parallel
-          ctest --test-dir build/ci --output-on-failure --no-tests=error --parallel
+          sudo cmake --fresh -S . -B build/ci-linux -DBUILD_TESTING=ON
+          sudo cmake --build build/ci-linux --parallel
+          sudo ctest --test-dir build/ci-linux --output-on-failure --no-tests=error --parallel
+
+      - name: Repo CMake smoke (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cmake --fresh -S . -B build/ci-macos -DBUILD_TESTING=ON
+          cmake --build build/ci-macos --parallel
+          ctest --test-dir build/ci-macos --output-on-failure --no-tests=error --parallel
 
       - name: Repo CMake smoke (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cmake --fresh -S . -B build/ci -DBUILD_TESTING=ON
-          cmake --build build/ci --parallel
-          ctest --test-dir build/ci --output-on-failure --no-tests=error --parallel
+          cmake --fresh -S . -B build/ci-windows -DBUILD_TESTING=ON
+          cmake --build build/ci-windows --parallel
+          ctest --test-dir build/ci-windows --output-on-failure --no-tests=error --parallel

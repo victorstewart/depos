@@ -43,7 +43,7 @@ fn sync_builds_cargo_package_with_native_portable_backend() {
         ),
         &format!(
             "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE GIT {} HEAD\nBUILD_SYSTEM CARGO\nCARGO_BUILD cargo build --release --target-dir ${{DEPO_BUILD_DIR}}/cargo-target --manifest-path Cargo.toml\nSTAGE_FILE SOURCE include/{package_name}/demo.h include/{package_name}/demo.h\nSTAGE_FILE BUILD {artifact_stage_source} {artifact_store_path}\nTARGET {package_name}::{package_name} STATIC {artifact_store_path} INTERFACE include\n",
-            portable_path(&repo)
+            portable_git_source(&repo)
         ),
     );
     sandbox.write(
@@ -89,7 +89,7 @@ fn sync_rejects_build_root_scratch_off_linux() {
         "scratch_demo",
         &format!(
             "NAME scratch_demo\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nBUILD_ROOT SCRATCH\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET scratch_demo::scratch_demo INTERFACE include\n",
-            portable_path(&repo)
+            portable_git_source(&repo)
         ),
     )
     .expect_err("BUILD_ROOT SCRATCH should be rejected off Linux");
@@ -108,7 +108,7 @@ fn sync_rejects_build_root_oci_off_linux() {
         "oci_demo",
         &format!(
             "NAME oci_demo\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET oci_demo::oci_demo INTERFACE include\n",
-            portable_path(&repo)
+            portable_git_source(&repo)
         ),
     )
     .expect_err("BUILD_ROOT OCI should be rejected off Linux");
@@ -128,7 +128,7 @@ fn sync_rejects_toolchain_rootfs_off_linux() {
         "rootfs_demo",
         &format!(
             "NAME rootfs_demo\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET rootfs_demo::rootfs_demo INTERFACE include\n",
-            portable_path(&repo)
+            portable_git_source(&repo)
         ),
     )
     .expect_err("TOOLCHAIN ROOTFS should be rejected off Linux");
@@ -147,7 +147,7 @@ fn sync_rejects_non_host_native_build_request_off_linux() {
         "cross_demo",
         &format!(
             "NAME cross_demo\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET cross_demo::cross_demo INTERFACE include\n",
-            portable_path(&repo),
+            portable_git_source(&repo),
             host_arch(),
             foreign_arch(),
         ),
@@ -194,6 +194,15 @@ fn assert_error_contains(error: &anyhow::Error, expected: &str) {
 
 fn portable_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn portable_git_source(path: &Path) -> String {
+    let path = portable_path(path);
+    if cfg!(windows) {
+        format!("file:///{path}")
+    } else {
+        format!("file://{path}")
+    }
 }
 
 fn foreign_arch() -> &'static str {
