@@ -391,7 +391,8 @@ function(_depos_bootstrap_with_cargo out_var)
   file(MAKE_DIRECTORY "${DEPOS_BOOTSTRAP_DIR}/.tool")
   set(_depos_cargo_command "${_depos_cargo_executable}")
   if (WIN32 AND "${_depos_cargo_executable}" MATCHES "\\.(cmd|bat)$")
-    set(_depos_cargo_command cmd /c "${_depos_cargo_executable}")
+    file(TO_NATIVE_PATH "${_depos_cargo_executable}" _depos_cargo_executable_native)
+    set(_depos_cargo_command cmd /c call "${_depos_cargo_executable_native}")
   endif()
 
   execute_process(
