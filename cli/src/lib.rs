@@ -1688,7 +1688,54 @@ fn default_system_tool_environment() -> Vec<(String, String)> {
     }
     #[cfg(target_os = "windows")]
     {
-        Vec::new()
+        let mut env = BTreeMap::new();
+        for (key, value) in std::env::vars() {
+            let upper = key.to_ascii_uppercase();
+            let preserve = matches!(
+                upper.as_str(),
+                "AR" | "CC"
+                    | "CL"
+                    | "COMMANDPROMPTTYPE"
+                    | "CXX"
+                    | "DEVENVDIR"
+                    | "EXTERNAL_INCLUDE"
+                    | "EXTENSIONSDKDIR"
+                    | "FRAMEWORKDIR"
+                    | "FRAMEWORKDIR64"
+                    | "FRAMEWORKVERSION"
+                    | "FRAMEWORKVERSION64"
+                    | "INCLUDE"
+                    | "LIB"
+                    | "LIBPATH"
+                    | "LINK"
+                    | "MT"
+                    | "PLATFORM"
+                    | "PLATFORMTOOLSET"
+                    | "PREFERREDTOOLARCHITECTURE"
+                    | "RC"
+                    | "UCRTVERSION"
+                    | "UNIVERSALCRTSDKDIR"
+                    | "VCIDEINSTALLDIR"
+                    | "VCINSTALLDIR"
+                    | "VCTOOLSINSTALLDIR"
+                    | "VCTOOLSREDISTDIR"
+                    | "VCTOOLSVERSION"
+                    | "VISUALSTUDIOVERSION"
+                    | "VSINSTALLDIR"
+                    | "WINDOWSLIBPATH"
+                    | "WINDOWSSDKBINPATH"
+                    | "WINDOWSSDKDIR"
+                    | "WINDOWSSDKLIBVERSION"
+                    | "WINDOWSSDKVERSION"
+                    | "WINDOWSSDKVERBINPATH"
+                    | "_CL_"
+                    | "_LINK_"
+            ) || upper.starts_with("VSCMD_");
+            if preserve {
+                env.insert(key, value);
+            }
+        }
+        env.into_iter().collect()
     }
 }
 

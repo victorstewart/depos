@@ -181,6 +181,15 @@ if (NOT DEFINED DEPOS_ALLOW_CARGO_BOOTSTRAP)
   )
 endif()
 
+if (NOT DEFINED DEPOS_CARGO_EXECUTABLE)
+  set(
+    DEPOS_CARGO_EXECUTABLE
+    ""
+    CACHE FILEPATH
+    "Explicit cargo executable used for local bootstrap instead of PATH lookup"
+  )
+endif()
+
 if (NOT DEFINED DEPOS_ALLOW_SYSTEM_EXECUTABLE)
   set(
     DEPOS_ALLOW_SYSTEM_EXECUTABLE
@@ -364,7 +373,11 @@ function(_depos_copy_interface_locally)
 endfunction()
 
 function(_depos_bootstrap_with_cargo out_var)
-  find_program(_depos_cargo_executable cargo)
+  if (DEFINED DEPOS_CARGO_EXECUTABLE AND NOT "${DEPOS_CARGO_EXECUTABLE}" STREQUAL "")
+    set(_depos_cargo_executable "${DEPOS_CARGO_EXECUTABLE}")
+  else()
+    find_program(_depos_cargo_executable cargo)
+  endif()
   if (NOT _depos_cargo_executable)
     message(FATAL_ERROR "cargo was not found; cannot bootstrap depos from crates.io.")
   endif()

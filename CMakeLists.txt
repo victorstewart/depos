@@ -138,6 +138,12 @@ cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"
   endif()
 
   set(DEPOS_SMOKE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke")
+  set(DEPOS_SMOKE_BUILD_CONFIG_ARGS)
+  set(DEPOS_SMOKE_CTEST_CONFIG_ARGS)
+  if (CMAKE_CONFIGURATION_TYPES)
+    list(APPEND DEPOS_SMOKE_BUILD_CONFIG_ARGS --config $<CONFIG>)
+    list(APPEND DEPOS_SMOKE_CTEST_CONFIG_ARGS -C $<CONFIG>)
+  endif()
 
   set(DEPOS_SMOKE_EXPLICIT_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/smoke-explicit")
   add_test(
@@ -153,7 +159,11 @@ cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"
   )
   add_test(
     NAME depos-cmake-explicit-build
-    COMMAND "${CMAKE_COMMAND}" --build "${DEPOS_SMOKE_EXPLICIT_BINARY_DIR}" --parallel
+    COMMAND
+      "${CMAKE_COMMAND}"
+      --build "${DEPOS_SMOKE_EXPLICIT_BINARY_DIR}"
+      ${DEPOS_SMOKE_BUILD_CONFIG_ARGS}
+      --parallel
   )
   set_tests_properties(depos-cmake-explicit-build PROPERTIES DEPENDS depos-cmake-explicit-configure)
   add_test(
@@ -161,6 +171,7 @@ cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"
     COMMAND
       "${CMAKE_CTEST_COMMAND}"
       --test-dir "${DEPOS_SMOKE_EXPLICIT_BINARY_DIR}"
+      ${DEPOS_SMOKE_CTEST_CONFIG_ARGS}
       --output-on-failure
       --no-tests=error
   )
@@ -177,11 +188,15 @@ cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"
       -DDEPOS_SMOKE_STYLE=all
       -DDEPOS_BOOTSTRAP_DIR=${DEPOS_SMOKE_BOOTSTRAP_BINARY_DIR}/.depos
       -DDEPOS_ALLOW_SYSTEM_EXECUTABLE=OFF
-      -DCMAKE_PROGRAM_PATH=${DEPOS_TEST_FAKE_CARGO_DIR}
+      -DDEPOS_CARGO_EXECUTABLE=${DEPOS_TEST_FAKE_CARGO}
   )
   add_test(
     NAME depos-cmake-bootstrap-build
-    COMMAND "${CMAKE_COMMAND}" --build "${DEPOS_SMOKE_BOOTSTRAP_BINARY_DIR}" --parallel
+    COMMAND
+      "${CMAKE_COMMAND}"
+      --build "${DEPOS_SMOKE_BOOTSTRAP_BINARY_DIR}"
+      ${DEPOS_SMOKE_BUILD_CONFIG_ARGS}
+      --parallel
   )
   set_tests_properties(depos-cmake-bootstrap-build PROPERTIES DEPENDS depos-cmake-bootstrap-configure)
   add_test(
@@ -189,6 +204,7 @@ cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"
     COMMAND
       "${CMAKE_CTEST_COMMAND}"
       --test-dir "${DEPOS_SMOKE_BOOTSTRAP_BINARY_DIR}"
+      ${DEPOS_SMOKE_CTEST_CONFIG_ARGS}
       --output-on-failure
       --no-tests=error
   )

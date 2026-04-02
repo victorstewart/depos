@@ -79,6 +79,72 @@ fn sync_builds_cargo_package_with_native_portable_backend() {
 }
 
 #[test]
+fn sync_builds_cmake_package_with_native_portable_backend() {
+    let sandbox = Sandbox::new();
+    let package_name = "portable_cmake_demo";
+    let artifact_store_path = format!("lib/{}", static_library_file_name(package_name));
+    let archive = sandbox.create_source_archive(
+        "upstreams/portable_cmake_demo",
+        &[
+            (
+                "CMakeLists.txt",
+                &format!(
+                    "cmake_minimum_required(VERSION 3.21)\nproject({package_name} LANGUAGES CXX)\nadd_library({package_name} STATIC src/demo.cpp)\ntarget_compile_features({package_name} PUBLIC cxx_std_20)\ntarget_include_directories({package_name} PUBLIC \"$<BUILD_INTERFACE:${{CMAKE_CURRENT_SOURCE_DIR}}/include>\" \"$<INSTALL_INTERFACE:include>\")\ninstall(TARGETS {package_name} ARCHIVE DESTINATION lib)\ninstall(DIRECTORY include/ DESTINATION include)\n"
+                ),
+            ),
+            (
+                "src/demo.cpp",
+                "int portable_cmake_demo_add(int left, int right) {\n    return left + right;\n}\n",
+            ),
+            (
+                "include/portable_cmake_demo/demo.h",
+                "#pragma once\nint portable_cmake_demo_add(int left, int right);\n",
+            ),
+        ],
+    );
+    sandbox.write(
+        &format!(
+            "depofiles/local/{package_name}/{RELEASE_NAMESPACE}/1.0.0/main.DepoFile"
+        ),
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_SYSTEM CMAKE\nTARGET {package_name}::{package_name} STATIC {artifact_store_path} INTERFACE include\n",
+            portable_file_url(&archive)
+        ),
+    );
+    sandbox.write(
+        "manifests/portable_cmake_demo.cmake",
+        "depos_require(portable_cmake_demo VERSION 1.0.0)\n",
+    );
+
+    let output = sync_registry(&SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/portable_cmake_demo.cmake"),
+        executable: None,
+    })
+    .expect("sync should build portable native CMake package");
+
+    assert_eq!(output.selected.len(), 1);
+    assert!(sandbox
+        .package_store_path(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            "include/portable_cmake_demo/demo.h"
+        )
+        .is_file());
+    assert!(sandbox
+        .package_store_path(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            &artifact_store_path
+        )
+        .is_file());
+}
+
+#[test]
 fn sync_rejects_build_root_scratch_off_linux() {
     let sandbox = Sandbox::new();
     let archive = sandbox.create_source_archive(
