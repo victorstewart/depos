@@ -2,11 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use depos::{
     collect_statuses, register_depofile, registry_dir_from_manifest, sync_registry,
-    unregister_depofile, GlobalSystemLibs, RegisterOptions, StatusOptions, SyncOptions,
-    UnregisterOptions,
+    unregister_depofile, RegisterOptions, StatusOptions, SyncOptions, UnregisterOptions,
 };
 use metalor::{run_isolated_container_command, BindMount, ContainerRunCommand};
 use std::path::PathBuf;
@@ -32,8 +31,6 @@ enum Command {
         depos_root: PathBuf,
         #[arg(long)]
         manifest: PathBuf,
-        #[arg(long, value_enum)]
-        system_libs: Option<SystemLibsArg>,
     },
     #[command(hide = true, name = "internal-run")]
     InternalRun {
@@ -88,21 +85,6 @@ enum Command {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum SystemLibsArg {
-    Never,
-    Allow,
-}
-
-impl From<SystemLibsArg> for GlobalSystemLibs {
-    fn from(value: SystemLibsArg) -> Self {
-        match value {
-            SystemLibsArg::Never => Self::Never,
-            SystemLibsArg::Allow => Self::Allow,
-        }
-    }
-}
-
 fn default_depos_root() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -124,12 +106,10 @@ fn main() -> Result<()> {
         Command::Sync {
             depos_root,
             manifest,
-            system_libs,
         } => {
             let output = sync_registry(&SyncOptions {
                 depos_root,
                 manifest,
-                system_libs: system_libs.map(Into::into),
                 executable: Some(current_exe),
             })?;
             println!("{}", output.registry_dir.display());

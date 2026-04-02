@@ -4,8 +4,8 @@
 use depos::{
     collect_statuses, default_variant, host_arch, parse_depofile, parse_manifest,
     register_depofile, registry_dir_from_manifest, sync_registry, unregister_depofile,
-    GlobalSystemLibs, PackageState, RegisterOptions, RequestMode, RequestSource, StageKind,
-    StatusOptions, SyncOptions, UnregisterOptions,
+    PackageState, RegisterOptions, RequestMode, RequestSource, StageKind, StatusOptions,
+    SyncOptions, UnregisterOptions,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -14,6 +14,7 @@ use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 use tempfile::TempDir;
 
 const RELEASE_NAMESPACE: &str = "release";
@@ -34,7 +35,6 @@ fn sync_generates_registry_for_materialized_packages() {
     let output = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/example.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should succeed");
@@ -100,7 +100,6 @@ fn sync_emits_interface_metadata_and_honors_primary_target() {
     let output = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/consumer.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should succeed");
@@ -819,7 +818,6 @@ fn sync_materializes_cmake_build_system_package() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/cmake_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize BUILD_SYSTEM CMAKE package");
@@ -873,7 +871,6 @@ fn sync_materializes_cmake_build_system_package_with_direct_phase_commands() {
         manifest: sandbox
             .depos_root()
             .join("manifests/cmake_direct_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize direct-command CMake package");
@@ -925,7 +922,6 @@ fn sync_materializes_meson_build_system_package() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/meson_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize BUILD_SYSTEM MESON package");
@@ -995,7 +991,6 @@ fn sync_materializes_autoconf_build_system_package() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/autoconf_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize BUILD_SYSTEM AUTOCONF package");
@@ -1083,7 +1078,6 @@ fn sync_injects_pkg_config_libdir_for_autoconf_dependencies() {
         manifest: sandbox
             .depos_root()
             .join("manifests/autoconf_pkg_config_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should inject dependency PKG_CONFIG_LIBDIR automatically");
@@ -1147,7 +1141,6 @@ fn sync_materializes_autoconf_direct_configure_relative_executable_package() {
         manifest: sandbox
             .depos_root()
             .join("manifests/autoconf_direct_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize AUTOCONF_CONFIGURE ./configure package");
@@ -1198,7 +1191,6 @@ fn sync_materializes_cargo_build_system_package() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/cargo_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize BUILD_SYSTEM CARGO package");
@@ -1238,7 +1230,6 @@ fn sync_emits_target_specific_link_libraries() {
     let output = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/link_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should emit target-specific links");
@@ -1298,7 +1289,6 @@ fn sync_emits_generated_aliases_for_multi_role_target() {
     let output = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/multi_role_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should emit generated multi-role aliases");
@@ -1343,7 +1333,6 @@ fn sync_materializes_local_git_package_into_fresh_root() {
     let output = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/local_itoa.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize local git package");
@@ -1401,7 +1390,6 @@ fn sync_materializes_local_packages_in_dependency_order() {
     let output = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/dependent_first.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize local dependencies before dependents");
@@ -1425,6 +1413,134 @@ fn sync_materializes_local_packages_in_dependency_order() {
             "include/dependent/dependent.h",
         )
         .exists());
+}
+
+#[test]
+fn sync_rematerializes_local_dependents_when_dependency_materialization_changes() {
+    let sandbox = Sandbox::new();
+    let base_upstream = sandbox.create_git_repo(
+        "upstreams/base_snapshot",
+        &[("payload/base.h", "// first base\n")],
+    );
+    let dependent_upstream = sandbox.create_git_repo(
+        "upstreams/dependent_snapshot",
+        &[("payload/unused.txt", "unused\n")],
+    );
+    sandbox.write(
+        "depofiles/local/base_snapshot/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME base_snapshot\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nTARGET base_snapshot::base_snapshot INTERFACE include\nSOURCE GIT {} HEAD\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\nmkdir -p \"${{DEPO_PREFIX}}/include/base_snapshot\" && cp \"${{DEPO_SOURCE_DIR}}/payload/base.h\" \"${{DEPO_PREFIX}}/include/base_snapshot/base.h\"\nEOF\n",
+            base_upstream.display()
+        ),
+    );
+    sandbox.write(
+        "depofiles/local/dependent_snapshot/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME dependent_snapshot\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nDEPENDS base_snapshot VERSION 1.0.0\nTARGET dependent_snapshot::dependent_snapshot INTERFACE include\nSOURCE GIT {} HEAD\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\nmkdir -p \"${{DEPO_PREFIX}}/include/dependent_snapshot\" && cp \"$DEPO_DEP_BASE_SNAPSHOT_RELEASE_ROOT/include/base_snapshot/base.h\" \"${{DEPO_PREFIX}}/include/dependent_snapshot/base_snapshot.h\"\nEOF\n",
+            dependent_upstream.display()
+        ),
+    );
+    sandbox.write(
+        "manifests/dependent_snapshot.cmake",
+        "depos_require(dependent_snapshot VERSION 1.0.0)\n",
+    );
+
+    let options = SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/dependent_snapshot.cmake"),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    };
+    sync_registry(&options).expect("first sync should materialize dependency snapshot");
+    let dependent_header = sandbox.package_store_path(
+        "dependent_snapshot",
+        RELEASE_NAMESPACE,
+        "1.0.0",
+        "include/dependent_snapshot/base_snapshot.h",
+    );
+    assert_eq!(
+        fs::read_to_string(&dependent_header).expect("read first dependent snapshot"),
+        "// first base\n"
+    );
+
+    fs::write(base_upstream.join("payload/base.h"), "// second base\n")
+        .expect("update base snapshot header");
+    run_command(&base_upstream, ["git", "add", "payload/base.h"]);
+    run_command(
+        &base_upstream,
+        ["git", "commit", "--quiet", "-m", "update base snapshot"],
+    );
+
+    sync_registry(&options).expect("second sync should rematerialize dependent snapshot");
+
+    assert_eq!(
+        fs::read_to_string(&dependent_header).expect("read second dependent snapshot"),
+        "// second base\n"
+    );
+    let log = fs::read_to_string(sandbox.package_log_path(
+        "dependent_snapshot",
+        RELEASE_NAMESPACE,
+        "1.0.0",
+    ))
+    .expect("read dependent snapshot log");
+    assert!(!log.contains("materialization already up to date"));
+    assert!(log.contains("materialization complete"));
+}
+
+#[test]
+fn sync_materializes_independent_local_packages_in_parallel() {
+    if std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        < 2
+    {
+        return;
+    }
+
+    let sandbox = Sandbox::new();
+    for name in ["alpha_parallel", "beta_parallel", "gamma_parallel"] {
+        let upstream = sandbox.create_git_repo(
+            &format!("upstreams/{name}"),
+            &[(&format!("payload/{name}.h"), &format!("// {name}\n"))],
+        );
+        sandbox.write(
+            &format!("depofiles/local/{name}/release/1.0.0/main.DepoFile"),
+            &format!(
+                "NAME {name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nTARGET {name}::{name} INTERFACE include\nSOURCE GIT {} HEAD\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\nsleep 2\nmkdir -p \"${{DEPO_PREFIX}}/include/{name}\" && cp \"${{DEPO_SOURCE_DIR}}/payload/{name}.h\" \"${{DEPO_PREFIX}}/include/{name}/{name}.h\"\nEOF\n",
+                upstream.display()
+            ),
+        );
+    }
+    sandbox.write(
+        "manifests/parallel_locals.cmake",
+        "depos_require(alpha_parallel VERSION 1.0.0)\ndepos_require(beta_parallel VERSION 1.0.0)\ndepos_require(gamma_parallel VERSION 1.0.0)\n",
+    );
+
+    let started = Instant::now();
+    sync_registry(&SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox.depos_root().join("manifests/parallel_locals.cmake"),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    })
+    .expect("sync should materialize independent local packages in parallel");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed.as_secs_f32() < 5.0,
+        "expected parallel local materialization, elapsed {:?}",
+        elapsed
+    );
+    for name in ["alpha_parallel", "beta_parallel", "gamma_parallel"] {
+        assert!(sandbox
+            .package_store_path(
+                name,
+                RELEASE_NAMESPACE,
+                "1.0.0",
+                &format!("include/{name}/{name}.h"),
+            )
+            .exists());
+    }
 }
 
 #[test]
@@ -1465,7 +1581,6 @@ fn sync_inherits_dependency_namespace_and_interpolates_dep_roots() {
         manifest: sandbox
             .depos_root()
             .join("manifests/dependent_dev_namespace.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should inherit dependency namespace and interpolate dep roots");
@@ -1523,7 +1638,6 @@ fn sync_preserves_symlinked_exports_in_store() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/symlink_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should preserve symlinked exports");
@@ -1594,7 +1708,6 @@ fn sync_rejects_exported_symlink_that_escapes_source_root() {
         manifest: sandbox
             .depos_root()
             .join("manifests/symlink_escape_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("escaping symlink exports should be rejected");
@@ -1649,7 +1762,6 @@ fn sync_rejects_source_subdir_symlink_that_escapes_source_root() {
         manifest: sandbox
             .depos_root()
             .join("manifests/source_subdir_escape.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("SOURCE_SUBDIR symlink escape should be rejected");
@@ -1695,7 +1807,6 @@ fn sync_rejects_staged_symlink_that_escapes_source_root() {
         manifest: sandbox
             .depos_root()
             .join("manifests/staged_symlink_escape_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("staged escaping symlink should be rejected");
@@ -1745,7 +1856,6 @@ fn sync_rejects_export_path_through_intermediate_symlink_directory() {
         manifest: sandbox
             .depos_root()
             .join("manifests/export_path_escape.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("intermediate export symlink directory should be rejected");
@@ -1798,7 +1908,6 @@ fn sync_rejects_stage_source_path_through_intermediate_symlink_directory() {
         manifest: sandbox
             .depos_root()
             .join("manifests/stage_path_escape.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("intermediate stage source symlink directory should be rejected");
@@ -1832,7 +1941,6 @@ fn sync_replaces_stale_owned_exports_and_unregister_cleans_store() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/owned_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("first sync should materialize owned exports");
@@ -1869,7 +1977,6 @@ fn sync_replaces_stale_owned_exports_and_unregister_cleans_store() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/owned_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("second sync should replace stale owned exports");
@@ -1900,6 +2007,75 @@ fn sync_replaces_stale_owned_exports_and_unregister_cleans_store() {
         .depos_root()
         .join(".run/exports/owned_demo/release/1.0.0.exports")
         .exists());
+}
+
+#[test]
+fn sync_rematerializes_when_the_depofile_changes() {
+    let sandbox = Sandbox::new();
+    let upstream = sandbox.create_git_repo(
+        "upstreams/depofile_cache_demo",
+        &[
+            ("payload/one.h", "// from one\n"),
+            ("payload/two.h", "// from two\n"),
+        ],
+    );
+    let pinned_commit = run_command_capture(&upstream, ["git", "rev-parse", "HEAD"]);
+    let depofile_path = "depofiles/local/depofile_cache_demo/release/1.0.0/main.DepoFile";
+    sandbox.write(
+        depofile_path,
+        &format!(
+            "NAME depofile_cache_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nTARGET depofile_cache_demo::depofile_cache_demo INTERFACE include\nSOURCE GIT {} {}\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\nmkdir -p \"${{DEPO_PREFIX}}/include/depofile_cache_demo\" && cp \"${{DEPO_SOURCE_DIR}}/payload/one.h\" \"${{DEPO_PREFIX}}/include/depofile_cache_demo/demo.h\"\nEOF\n",
+            upstream.display(),
+            pinned_commit.trim()
+        ),
+    );
+    sandbox.write(
+        "manifests/depofile_cache_demo.cmake",
+        "depos_require(depofile_cache_demo VERSION 1.0.0)\n",
+    );
+
+    let options = SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/depofile_cache_demo.cmake"),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    };
+    let installed_header = sandbox.package_store_path(
+        "depofile_cache_demo",
+        RELEASE_NAMESPACE,
+        "1.0.0",
+        "include/depofile_cache_demo/demo.h",
+    );
+
+    sync_registry(&options).expect("first sync should materialize depofile cache demo");
+    assert_eq!(
+        fs::read_to_string(&installed_header).expect("read first depofile cache header"),
+        "// from one\n"
+    );
+
+    sandbox.write(
+        depofile_path,
+        &format!(
+            "NAME depofile_cache_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nTARGET depofile_cache_demo::depofile_cache_demo INTERFACE include\nSOURCE GIT {} {}\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\nmkdir -p \"${{DEPO_PREFIX}}/include/depofile_cache_demo\" && cp \"${{DEPO_SOURCE_DIR}}/payload/two.h\" \"${{DEPO_PREFIX}}/include/depofile_cache_demo/demo.h\"\nEOF\n",
+            upstream.display(),
+            pinned_commit.trim()
+        ),
+    );
+
+    sync_registry(&options).expect("second sync should rematerialize depofile cache demo");
+    assert_eq!(
+        fs::read_to_string(&installed_header).expect("read second depofile cache header"),
+        "// from two\n"
+    );
+    let log = fs::read_to_string(sandbox.package_log_path(
+        "depofile_cache_demo",
+        RELEASE_NAMESPACE,
+        "1.0.0",
+    ))
+    .expect("read depofile cache log");
+    assert!(!log.contains("materialization already up to date"));
+    assert!(log.contains("reuse exact git commit"));
 }
 
 #[test]
@@ -1939,7 +2115,6 @@ fn sync_allows_overlapping_export_paths_in_isolated_package_roots() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/conflict_owner.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("owner package should materialize");
@@ -1949,7 +2124,6 @@ fn sync_allows_overlapping_export_paths_in_isolated_package_roots() {
         manifest: sandbox
             .depos_root()
             .join("manifests/conflict_contender.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("isolated package roots should allow the same relative export path");
@@ -2008,7 +2182,6 @@ fn sync_rejects_parallel_namespaces_without_alias_when_public_targets_collide() 
     let error = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/twin_conflict.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("parallel namespaces with the same public targets should require aliasing");
@@ -2051,7 +2224,6 @@ fn sync_supports_parallel_namespaces_with_manifest_aliasing() {
     let output = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/twin_alias.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("parallel namespaces should succeed when the dev namespace is aliased");
@@ -2112,7 +2284,6 @@ fn sync_materializes_local_git_package_from_named_branch() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/branch_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize branch-based git package");
@@ -2160,7 +2331,6 @@ fn sync_materializes_local_git_package_from_exact_commit() {
     let output = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/commit_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize commit-pinned git package");
@@ -2197,6 +2367,49 @@ fn sync_materializes_local_git_package_from_exact_commit() {
 }
 
 #[test]
+fn sync_skips_up_to_date_exact_commit_local_package_without_refetching() {
+    let sandbox = Sandbox::new();
+    let upstream = sandbox.create_git_repo(
+        "upstreams/exact_commit_cached",
+        &[("include/exact_commit_cached/demo.h", "// cached commit\n")],
+    );
+    let pinned_commit = run_command_capture(&upstream, ["git", "rev-parse", "HEAD"]);
+    sandbox.write(
+        "depofiles/local/exact_commit_cached/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME exact_commit_cached\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nTARGET exact_commit_cached::exact_commit_cached INTERFACE include\nSOURCE GIT {} {}\n",
+            upstream.display(),
+            pinned_commit.trim()
+        ),
+    );
+    sandbox.write(
+        "manifests/exact_commit_cached.cmake",
+        "depos_require(exact_commit_cached VERSION 1.0.0)\n",
+    );
+
+    let options = SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/exact_commit_cached.cmake"),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    };
+    sync_registry(&options).expect("first sync should materialize exact-commit package");
+    sync_registry(&options).expect("second sync should reuse exact-commit package");
+
+    let log = fs::read_to_string(sandbox.package_log_path(
+        "exact_commit_cached",
+        RELEASE_NAMESPACE,
+        "1.0.0",
+    ))
+    .expect("read cached exact-commit log");
+    assert!(log.contains("reuse exact git commit"));
+    assert!(log.contains("materialization already up to date"));
+    assert!(!log.contains("run git fetch"));
+    assert!(!log.contains("run git checkout"));
+}
+
+#[test]
 fn sync_materializes_local_url_package_into_fresh_root() {
     let sandbox = Sandbox::new();
     let archive = sandbox.create_tar_archive(
@@ -2223,7 +2436,6 @@ fn sync_materializes_local_url_package_into_fresh_root() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/url_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize local url package");
@@ -2236,6 +2448,47 @@ fn sync_materializes_local_url_package_into_fresh_root() {
             "include/url_demo/demo.h"
         )
         .exists());
+}
+
+#[test]
+fn sync_skips_up_to_date_url_package_without_redownloading() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.create_tar_archive(
+        "archives/url_cached_demo",
+        &[("include/url_cached_demo/demo.h", "// cached archive\n")],
+    );
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(fs::read(&archive).expect("read archive"))
+    );
+    sandbox.write(
+        "depofiles/local/url_cached_demo/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME url_cached_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nTARGET url_cached_demo::url_cached_demo INTERFACE include\nSOURCE URL file://{}\nSHA256 {}\n",
+            archive.display(),
+            digest
+        ),
+    );
+    sandbox.write(
+        "manifests/url_cached_demo.cmake",
+        "depos_require(url_cached_demo VERSION 1.0.0)\n",
+    );
+
+    let options = SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox.depos_root().join("manifests/url_cached_demo.cmake"),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    };
+    sync_registry(&options).expect("first sync should materialize cached url package");
+    sync_registry(&options).expect("second sync should reuse cached url package");
+
+    let log =
+        fs::read_to_string(sandbox.package_log_path("url_cached_demo", RELEASE_NAMESPACE, "1.0.0"))
+            .expect("read cached url log");
+    assert!(log.contains("reuse cached url archive"));
+    assert!(log.contains("materialization already up to date"));
+    assert!(!log.contains("run curl"));
+    assert!(!log.contains("extract url archive"));
 }
 
 #[test]
@@ -2269,7 +2522,6 @@ fn sync_rejects_local_url_archive_with_path_traversal_entries() {
         manifest: sandbox
             .depos_root()
             .join("manifests/url_traversal_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("archive traversal entries should be rejected");
@@ -2300,7 +2552,6 @@ fn sync_materializes_command_driven_package_into_fresh_root() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/cmd_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize command-driven package");
@@ -2345,7 +2596,6 @@ fn sync_materializes_manual_install_tree_package_without_shell_install() {
         manifest: sandbox
             .depos_root()
             .join("manifests/manual_tree_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize manual install tree package");
@@ -2395,7 +2645,6 @@ fn sync_materializes_manual_target_directly_from_source_tree() {
         manifest: sandbox
             .depos_root()
             .join("manifests/manual_source_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize direct source manual package");
@@ -2434,7 +2683,6 @@ fn sync_materializes_manual_target_directly_from_build_tree() {
         manifest: sandbox
             .depos_root()
             .join("manifests/manual_build_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize direct build manual package");
@@ -2481,7 +2729,6 @@ fn sync_rejects_manual_target_when_source_and_build_outputs_are_ambiguous() {
         manifest: sandbox
             .depos_root()
             .join("manifests/manual_ambiguous_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("sync should reject ambiguous manual direct exports");
@@ -2510,7 +2757,6 @@ fn sync_rejects_unset_variable_in_shell_hook_by_default() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/unset_var_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("shell hooks should fail on unset variables by default");
@@ -2551,7 +2797,6 @@ fn sync_materializes_dependencies_before_dependents() {
         manifest: sandbox
             .depos_root()
             .join("manifests/dependency_order_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize dependency packages before dependents");
@@ -2608,7 +2853,6 @@ fn sync_materializes_scratch_package_with_toolchain_inputs_and_isolation() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/scratch_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize scratch package");
@@ -2655,7 +2899,6 @@ fn sync_rejects_scratch_package_without_toolchain_inputs() {
         manifest: sandbox
             .depos_root()
             .join("manifests/scratch_missing_toolchain.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("scratch builds without TOOLCHAIN_INPUT should be rejected");
@@ -2691,7 +2934,6 @@ fn sync_rejects_scratch_package_with_rootfs_toolchain() {
         manifest: sandbox
             .depos_root()
             .join("manifests/scratch_rootfs_toolchain.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("scratch builds with TOOLCHAIN ROOTFS should be rejected");
@@ -2726,7 +2968,6 @@ fn sync_rejects_scratch_package_with_relative_toolchain_input() {
         manifest: sandbox
             .depos_root()
             .join("manifests/scratch_relative_toolchain.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("relative TOOLCHAIN_INPUT should be rejected");
@@ -2763,7 +3004,6 @@ fn sync_rejects_scratch_package_with_missing_toolchain_input() {
         manifest: sandbox
             .depos_root()
             .join("manifests/scratch_missing_input_path.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("missing TOOLCHAIN_INPUT should be rejected");
@@ -2801,7 +3041,6 @@ fn sync_rejects_foreign_scratch_command_pipeline() {
         manifest: sandbox
             .depos_root()
             .join("manifests/foreign_scratch_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("foreign scratch builds should be rejected");
@@ -2843,7 +3082,6 @@ fn sync_rejects_cross_target_scratch_command_pipeline() {
         manifest: sandbox
             .depos_root()
             .join("manifests/cross_target_scratch_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("cross-target scratch builds should be rejected");
@@ -2880,7 +3118,6 @@ fn sync_materializes_oci_rootfs_package_into_fresh_root() {
     sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/oci_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize OCI-rootfs package");
@@ -2932,7 +3169,6 @@ fn sync_materializes_oci_rootfs_package_with_toolchain_inputs() {
         manifest: sandbox
             .depos_root()
             .join("manifests/oci_toolchain_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize OCI-rootfs package via TOOLCHAIN_INPUT");
@@ -2979,7 +3215,6 @@ fn sync_materializes_foreign_oci_rootfs_package_with_toolchain_inputs() {
         manifest: sandbox
             .depos_root()
             .join("manifests/foreign_oci_toolchain_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("sync should materialize foreign OCI-rootfs package via TOOLCHAIN_INPUT");
@@ -3027,7 +3262,6 @@ fn sync_rejects_foreign_system_command_pipeline() {
         manifest: sandbox
             .depos_root()
             .join("manifests/foreign_system_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("foreign system builds should be rejected");
@@ -3071,7 +3305,6 @@ fn sync_materializes_cross_target_oci_rootfs_package_into_target_variant() {
         manifest: sandbox
             .depos_root()
             .join("manifests/foreign_cross_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("cross-target OCI package should materialize");
@@ -3148,7 +3381,6 @@ fn sync_materializes_cross_target_oci_when_build_arch_is_foreign() {
         manifest: sandbox
             .depos_root()
             .join("manifests/foreign_build_cross_demo.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect("foreign-build cross-target OCI package should materialize");
@@ -3208,7 +3440,6 @@ fn sync_rejects_manifest_with_multiple_target_arches() {
     let error = sync_registry(&SyncOptions {
         depos_root: sandbox.depos_root(),
         manifest: sandbox.depos_root().join("manifests/mixed_targets.cmake"),
-        system_libs: Some(GlobalSystemLibs::Never),
         executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
     })
     .expect_err("mixed target architectures should be rejected");
@@ -3511,8 +3742,32 @@ fn cmake_depend_functions_emit_status_updates() {
     assert!(explicit_output.contains("depos: requesting bitsery VERSION 5.2.3"));
     assert!(explicit_output.contains("depos: requesting zlib VERSION 1.3.2"));
     assert!(explicit_output.contains("depos: using system depos at"));
+    assert_eq!(explicit_output.matches("depos: syncing ").count(), 1);
     assert!(explicit_output.contains("depos: syncing 3 dependency request(s) with system depos"));
     assert!(explicit_output.contains("depos: loaded registry targets from"));
+
+    let files_build = sandbox.depos_root().join("cmake-status").join("files");
+    let files_output = configure_cmake_capture_output(
+        smoke_source,
+        &files_build,
+        &[
+            (
+                "DEPOS_EXECUTABLE".to_string(),
+                depos_binary.display().to_string(),
+            ),
+            (
+                "DEPOS_ROOT".to_string(),
+                files_build.join("depos-root").display().to_string(),
+            ),
+            ("DEPOS_SMOKE_STYLE".to_string(), "files".to_string()),
+        ],
+        &[],
+    );
+    assert!(files_output.contains("depos: requesting bitsery VERSION 5.2.3"));
+    assert!(files_output.contains("depos: requesting zlib VERSION 1.3.2"));
+    assert_eq!(files_output.matches("depos: syncing ").count(), 1);
+    assert!(files_output.contains("depos: syncing 3 dependency request(s) with system depos"));
+    assert!(files_output.contains("depos: loaded registry targets from"));
 
     let all_build = sandbox.depos_root().join("cmake-status").join("all");
     let all_output = configure_cmake_capture_output(
@@ -3535,8 +3790,65 @@ fn cmake_depend_functions_emit_status_updates() {
     assert!(
         all_output.contains("depos: registering 3 local DepoFile(s) under namespace depos_smoke")
     );
+    assert_eq!(all_output.matches("depos: syncing ").count(), 1);
     assert!(all_output.contains("depos: syncing 3 dependency request(s) with system depos"));
     assert!(all_output.contains("depos: loaded registry targets from"));
+}
+
+#[test]
+fn cmake_bootstrap_reads_repo_local_project_defaults() {
+    let sandbox = Sandbox::new();
+    let project_root = sandbox.depos_root().join("cmake-project-defaults");
+    fs::create_dir_all(&project_root).expect("create project root");
+    fs::copy(
+        "/root/depos/.depos.cmake",
+        project_root.join(".depos.cmake"),
+    )
+    .expect("copy helper into project root");
+    fs::copy(
+        "/root/depos/tests/smoke/main.cpp",
+        project_root.join("main.cpp"),
+    )
+    .expect("copy smoke source");
+    fs::write(
+        project_root.join("depos.project.cmake"),
+        "set(DEPOS_BOOTSTRAP_VERSION \"9.9.9\" CACHE STRING \"Pinned depos version used by test\" FORCE)\n",
+    )
+    .expect("write project defaults");
+    copy_tree(
+        Path::new("/root/depos/tests/smoke/fixtures/local"),
+        &project_root.join("depofiles"),
+    );
+    fs::write(
+        project_root.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.21)\nproject(project_defaults_demo LANGUAGES CXX)\ninclude(\"${CMAKE_CURRENT_LIST_DIR}/.depos.cmake\")\ndepos_depend_all()\nadd_executable(project-defaults-smoke main.cpp)\ntarget_compile_features(project-defaults-smoke PRIVATE cxx_std_20)\ndepos_link_all(project-defaults-smoke)\nenable_testing()\nadd_test(NAME project-defaults-smoke COMMAND project-defaults-smoke)\n",
+    )
+    .expect("write project CMakeLists");
+
+    let build_dir = sandbox.depos_root().join("cmake-project-defaults-build");
+    let fake_cargo_dir =
+        create_fake_cargo_dir_with_version(&sandbox, "fake-cargo/project-defaults", "9.9.9");
+    let output = configure_cmake_capture_output(
+        &project_root,
+        &build_dir,
+        &[(
+            "DEPOS_ALLOW_SYSTEM_EXECUTABLE".to_string(),
+            "OFF".to_string(),
+        )],
+        &[(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                fake_cargo_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )],
+    );
+
+    assert!(output.contains("depos: bootstrapping depos 9.9.9 locally with cargo install"));
+    let state = fs::read_to_string(project_root.join(".depos/.state.cmake"))
+        .expect("read bootstrapped project state");
+    assert!(state.contains("DEPOS_STATE_VERSION [==[9.9.9]==]"));
 }
 
 fn cmake_resolution_env(
@@ -3632,13 +3944,18 @@ fn configure_cmake_capture_output(
 }
 
 fn create_fake_cargo_dir(sandbox: &Sandbox, relative: &str) -> PathBuf {
+    create_fake_cargo_dir_with_version(sandbox, relative, "0.4.0")
+}
+
+fn create_fake_cargo_dir_with_version(sandbox: &Sandbox, relative: &str, version: &str) -> PathBuf {
     let dir = sandbox.depos_root().join(relative);
     fs::create_dir_all(&dir).expect("create fake cargo dir");
     let cargo = dir.join("cargo");
     fs::write(
         &cargo,
         format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\n\nif [[ \"${{1:-}}\" != \"install\" ]]; then\n  echo \"unexpected cargo invocation: $*\" >&2\n  exit 1\nfi\n\nroot=\"\"\nversion=\"\"\ncrate=\"\"\nwhile (($#)); do\n  case \"$1\" in\n    install|--locked)\n      shift\n      ;;\n    --root)\n      root=\"$2\"\n      shift 2\n      ;;\n    --version)\n      version=\"$2\"\n      shift 2\n      ;;\n    -j)\n      shift 2\n      ;;\n    depos)\n      crate=\"$1\"\n      shift\n      ;;\n    *)\n      echo \"unexpected cargo argument: $1\" >&2\n      exit 1\n      ;;\n  esac\ndone\n\ntest -n \"$root\"\ntest \"$version\" = \"0.3.0\"\ntest \"$crate\" = \"depos\"\nmkdir -p \"$root/bin\"\ncp '{}' \"$root/bin/depos\"\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\n\nif [[ \"${{1:-}}\" != \"install\" ]]; then\n  echo \"unexpected cargo invocation: $*\" >&2\n  exit 1\nfi\n\nroot=\"\"\nversion=\"\"\ncrate=\"\"\nwhile (($#)); do\n  case \"$1\" in\n    install|--locked)\n      shift\n      ;;\n    --root)\n      root=\"$2\"\n      shift 2\n      ;;\n    --version)\n      version=\"$2\"\n      shift 2\n      ;;\n    -j)\n      shift 2\n      ;;\n    depos)\n      crate=\"$1\"\n      shift\n      ;;\n    *)\n      echo \"unexpected cargo argument: $1\" >&2\n      exit 1\n      ;;\n  esac\ndone\n\ntest -n \"$root\"\ntest \"$version\" = \"{}\"\ntest \"$crate\" = \"depos\"\nmkdir -p \"$root/bin\"\ncp '{}' \"$root/bin/depos\"\n",
+            version,
             env!("CARGO_BIN_EXE_depos")
         ),
     )
@@ -3739,7 +4056,6 @@ impl Sandbox {
         fs::create_dir_all(root.path().join("store").join(default_variant()))
             .expect("create store");
         let sandbox = Self { root };
-        sandbox.write("depos.env.cmake", "set(DEPOS_SYSTEM_LIBS \"NEVER\")\n");
         sandbox.write("depofiles/.keep", "");
         sandbox.write(".run/.keep", "");
         sandbox
@@ -3777,6 +4093,15 @@ impl Sandbox {
     ) -> PathBuf {
         self.package_store_root(name, namespace, version)
             .join(relative)
+    }
+
+    fn package_log_path(&self, name: &str, namespace: &str, version: &str) -> PathBuf {
+        self.depos_root()
+            .join(".run")
+            .join("logs")
+            .join(name)
+            .join(namespace)
+            .join(format!("{version}.log"))
     }
 
     fn package_store_path_for_variant(

@@ -2,19 +2,19 @@
 
 `depos` installs the `depos` executable.
 
-`depos` is an external dependency builder and repository manager for C and C++ projects. It is intended to be used as a tool binary, not primarily as a Rust library dependency.
+`depos` is an external dependency builder and repository manager for C and C++ projects. It is intended to be used as a tool binary, not primarily as a Rust library dependency. It reuses unchanged local materializations and cached sources so repeated syncs do not rebuild everything from scratch. Changing the registered `DepoFile`, the resolved source, or a local dependency forces rematerialization.
 
 ## Install
 
 ```bash
-cargo install depos --version 0.3.0
+cargo install depos --version 0.4.0
 ```
 
-Primary distribution is GitHub release binaries. `cargo install depos --version 0.3.0` is the convenience path.
+Primary distribution is GitHub release binaries. `cargo install depos --version 0.4.0` is the convenience path.
 
 Preferred resolution order for consuming projects:
 
-1. default project-local `cargo install depos --version 0.3.0`
+1. default project-local `cargo install depos --version 0.4.0`
 2. explicit override such as `DEPOS_EXECUTABLE`
 3. optional system `depos` on `PATH` if enabled by the project
 
@@ -53,11 +53,18 @@ depos_depend(zlib VERSION 1.3.2)
 depos_link(app bitsery itoa zlib)
 ```
 
-`depos_depend(...)` can also take a single `DepoFile` path, and `depos_depend_all(...)` can take a depofiles directory path only. `depos_link(...)` and `depos_link_all(...)` default to `PUBLIC`; pass `PRIVATE` immediately after the target name if you want to stop propagation:
+`depos_depend(...)` and `depos_depend_all(...)` queue requests during configure and `.depos.cmake` syncs them once, lazily, on the first `depos_link(...)` or `depos_link_all(...)` that needs the registry. Imported targets from queued requests are not guaranteed to exist until that first `depos_link*` call or `depos_use(MANIFEST ...)` performs the sync. `depos_link(...)` and `depos_link_all(...)` default to `PUBLIC`; pass `PRIVATE` immediately after the target name if you want to stop propagation:
 
 ```cmake
+depos_depend(
+  FILES
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/depofiles/zlib.DepoFile"
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/depofiles/openssl.DepoFile"
+)
 depos_link(app PRIVATE zlib)
 ```
+
+For the full CMake contract, including `FILE`/`FILES`, `depos_depend_all(...)`, project-local defaults, and source-tree consumption details, see [README.md](/root/depos/README.md).
 
 Libraries that ship with `depos` support two consumer modes:
 
@@ -69,12 +76,12 @@ depos_depend(cascade_lib VERSION 1.0.0)
 depos_link(app cascade_lib)
 ```
 
-During configure, `.depos.cmake` emits `depos:` status lines while it bootstraps the tool, registers local `DepoFile`s, and syncs the registry so dependency work does not look stalled. Library maintainers should install `.depos.cmake` at the top of the repo before publishing and keep dependency `DepoFile`s in the public top-level `depofiles/` directory beside it so consumer builds can include the hidden helper there, self-bootstrap, and just work.
+During configure, `.depos.cmake` emits `depos:` status lines while it bootstraps the tool, queues dependency requests, and performs the one lazy registry sync before first use so dependency work does not look stalled. For the full integration contract and examples, see [README.md](/root/depos/README.md).
 
-If you do not want CMake to bootstrap `depos 0.3.0` locally, tell builders to install it ahead of time:
+If you do not want CMake to bootstrap `depos 0.4.0` locally, tell builders to install it ahead of time:
 
 ```bash
-cargo install depos --version 0.3.0
+cargo install depos --version 0.4.0
 ```
 
 ## Current scope

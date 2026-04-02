@@ -19,29 +19,6 @@ use std::process::Command;
 const DEFAULT_NAMESPACE: &str = "release";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum GlobalSystemLibs {
-    Never,
-    Allow,
-}
-
-impl GlobalSystemLibs {
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "NEVER" => Ok(Self::Never),
-            "ALLOW" => Ok(Self::Allow),
-            _ => bail!("unsupported DEPOS_SYSTEM_LIBS value {value}"),
-        }
-    }
-
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Never => "NEVER",
-            Self::Allow => "ALLOW",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackageSystemLibs {
     Inherit,
     Never,
@@ -403,6 +380,34 @@ struct ExportManifest {
 struct SourceProvenance {
     source_ref: Option<String>,
     source_commit: Option<String>,
+    source_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MaterializationState {
+    store_root: PathBuf,
+    depofile_hash: String,
+    build_key: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedSource {
+    source_root: PathBuf,
+    provenance: SourceProvenance,
+    preparation: SourcePreparationPlan,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SourcePreparationPlan {
+    Git {
+        source_root: PathBuf,
+        desired_commit: String,
+        submodules_recursive: bool,
+    },
+    Url {
+        archive_path: PathBuf,
+        source_root: PathBuf,
+    },
 }
 
 impl Display for PackageStatus {
@@ -432,7 +437,6 @@ pub struct RegistryOutput {
 pub struct SyncOptions {
     pub depos_root: PathBuf,
     pub manifest: PathBuf,
-    pub system_libs: Option<GlobalSystemLibs>,
     pub executable: Option<PathBuf>,
 }
 
@@ -458,11 +462,6 @@ pub struct StatusOptions {
     pub namespace: Option<String>,
     pub version: Option<String>,
     pub refresh: bool,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct RepoConfig {
-    system_libs: Option<GlobalSystemLibs>,
 }
 
 pub fn default_variant() -> String {
@@ -561,7 +560,6 @@ pub fn sync_registry(options: &SyncOptions) -> Result<RegistryOutput> {
     })?;
     let manifest = canonical_path(&options.manifest)
         .with_context(|| format!("failed to access manifest {}", options.manifest.display()))?;
-    let system_libs = resolve_global_system_libs(&depos_root, options.system_libs.clone())?;
     let executable = resolve_depos_executable(options.executable.as_deref())?;
 
     let catalog = load_catalog(&depos_root)?;
@@ -581,7 +579,7 @@ pub fn sync_registry(options: &SyncOptions) -> Result<RegistryOutput> {
             registry_dir.display()
         )
     })?;
-    materialize_local_packages(&depos_root, &variant, &selected, &executable, &system_libs)?;
+    materialize_local_packages(&depos_root, &variant, &selected, &executable)?;
     ensure_builtin_package_roots(&depos_root, &variant, &selected)?;
     validate_materialized_packages(&depos_root, &variant, &selected)?;
 
@@ -596,25 +594,12 @@ pub fn sync_registry(options: &SyncOptions) -> Result<RegistryOutput> {
     .with_context(|| format!("failed to write {}", validate_file.display()))?;
     fs::write(
         &targets_file,
-        render_targets_cmake(
-            &depos_root,
-            &variant,
-            &validate_file,
-            system_libs.clone(),
-            &selected,
-        )?,
+        render_targets_cmake(&depos_root, &variant, &validate_file, &selected)?,
     )
     .with_context(|| format!("failed to write {}", targets_file.display()))?;
     fs::write(
         &lock_file,
-        render_lock_cmake(
-            &depos_root,
-            &manifest,
-            &variant,
-            &registry_dir,
-            system_libs,
-            &selected,
-        ),
+        render_lock_cmake(&depos_root, &manifest, &variant, &registry_dir, &selected),
     )
     .with_context(|| format!("failed to write {}", lock_file.display()))?;
 
@@ -632,84 +617,135 @@ fn materialize_local_packages(
     variant: &str,
     selected: &[ResolvedPackage],
     executable: &Path,
-    global_system_libs: &GlobalSystemLibs,
 ) -> Result<()> {
-    for package in local_materialization_order(depos_root, selected)? {
-        let store_root = package_store_root(depos_root, variant, &package.spec);
-        fs::create_dir_all(&store_root)
-            .with_context(|| format!("failed to create {}", store_root.display()))?;
-        if let Err(error) = materialize_local_package(
-            depos_root,
-            &store_root,
-            &package.spec,
-            executable,
-            global_system_libs,
-        ) {
+    for layer in local_materialization_layers(depos_root, selected)? {
+        if layer.len() == 1 {
+            materialize_one_local_package(depos_root, variant, layer[0], executable)?;
+            continue;
+        }
+
+        let mut first_error = None;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for package in &layer {
+                let package = *package;
+                handles.push((
+                    package.spec.package_id(),
+                    scope.spawn(move || {
+                        materialize_one_local_package(depos_root, variant, package, executable)
+                    }),
+                ));
+            }
+
+            for (package_id, handle) in handles {
+                match handle.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        if first_error.is_none() {
+                            first_error =
+                                Some(error.context(format!("failed to materialize {package_id}")));
+                        }
+                    }
+                    Err(_) => {
+                        if first_error.is_none() {
+                            first_error = Some(anyhow!(
+                                "local materialization worker panicked for {package_id}"
+                            ));
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
+    seed_builtin_package_roots(depos_root, variant, selected)?;
+    Ok(())
+}
+
+fn materialize_one_local_package(
+    depos_root: &Path,
+    variant: &str,
+    package: &ResolvedPackage,
+    executable: &Path,
+) -> Result<()> {
+    let store_root = package_store_root(depos_root, variant, &package.spec);
+    fs::create_dir_all(&store_root)
+        .with_context(|| format!("failed to create {}", store_root.display()))?;
+    match materialize_local_package(depos_root, &store_root, &package.spec, executable) {
+        Ok(message) => {
+            write_materialization_status(depos_root, &package.spec, PackageState::Green, message)?;
+            Ok(())
+        }
+        Err(error) => {
             write_materialization_status(
                 depos_root,
                 &package.spec,
                 PackageState::Failed,
                 error.to_string(),
             )?;
-            return Err(error)
-                .with_context(|| format!("failed to materialize {}", package.spec.package_id()));
+            Err(error)
         }
-        write_materialization_status(
-            depos_root,
-            &package.spec,
-            PackageState::Green,
-            format!(
-                "all declared exports are present under {}",
-                store_root.display()
-            ),
-        )?;
     }
-    seed_builtin_package_roots(depos_root, variant, selected)?;
-    Ok(())
 }
 
-fn local_materialization_order<'a>(
+fn local_materialization_layers<'a>(
     depos_root: &Path,
     selected: &'a [ResolvedPackage],
-) -> Result<Vec<&'a ResolvedPackage>> {
+) -> Result<Vec<Vec<&'a ResolvedPackage>>> {
     let local_packages = selected
         .iter()
         .filter(|package| package.spec.origin == PackageOrigin::Local)
         .map(|package| (package.spec.package_id(), package))
         .collect::<BTreeMap<_, _>>();
-    let mut ordered = Vec::new();
+    let mut depths = BTreeMap::<String, usize>::new();
     let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
 
     for package in selected {
-        visit_local_materialization(
+        compute_local_materialization_depth(
             depos_root,
             package,
             &local_packages,
             &mut visiting,
-            &mut visited,
-            &mut ordered,
+            &mut depths,
         )?;
     }
 
-    Ok(ordered)
+    let mut layers = Vec::<Vec<&ResolvedPackage>>::new();
+    for package in local_packages.values() {
+        let depth = *depths.get(&package.spec.package_id()).with_context(|| {
+            format!(
+                "missing materialization depth for {}",
+                package.spec.package_id()
+            )
+        })?;
+        if layers.len() <= depth {
+            layers.resize_with(depth + 1, Vec::new);
+        }
+        layers[depth].push(*package);
+    }
+    for layer in &mut layers {
+        layer.sort_by(|left, right| left.spec.package_id().cmp(&right.spec.package_id()));
+    }
+    layers.retain(|layer| !layer.is_empty());
+    Ok(layers)
 }
 
-fn visit_local_materialization<'a>(
+fn compute_local_materialization_depth<'a>(
     depos_root: &Path,
     package: &'a ResolvedPackage,
     local_packages: &BTreeMap<String, &'a ResolvedPackage>,
     visiting: &mut BTreeSet<String>,
-    visited: &mut BTreeSet<String>,
-    ordered: &mut Vec<&'a ResolvedPackage>,
-) -> Result<()> {
+    depths: &mut BTreeMap<String, usize>,
+) -> Result<usize> {
     if package.spec.origin != PackageOrigin::Local {
-        return Ok(());
+        return Ok(0);
     }
 
     let package_id = package.spec.package_id();
-    if visited.contains(&package_id) {
-        return Ok(());
+    if let Some(depth) = depths.get(&package_id) {
+        return Ok(*depth);
     }
     if !visiting.insert(package_id.clone()) {
         bail!(
@@ -718,23 +754,23 @@ fn visit_local_materialization<'a>(
         );
     }
 
+    let mut max_dependency_depth = 0usize;
     for dependency in resolve_dependency_specs(depos_root, &package.spec)? {
         if let Some(local_dependency) = local_packages.get(&dependency.package_id()) {
-            visit_local_materialization(
+            let dependency_depth = compute_local_materialization_depth(
                 depos_root,
                 local_dependency,
                 local_packages,
                 visiting,
-                visited,
-                ordered,
+                depths,
             )?;
+            max_dependency_depth = max_dependency_depth.max(dependency_depth + 1);
         }
     }
 
     visiting.remove(&package_id);
-    visited.insert(package_id);
-    ordered.push(package);
-    Ok(())
+    depths.insert(package_id, max_dependency_depth);
+    Ok(max_dependency_depth)
 }
 
 fn ensure_builtin_package_roots(
@@ -868,16 +904,42 @@ fn materialize_local_package(
     store_root: &Path,
     spec: &PackageSpec,
     executable: &Path,
-    global_system_libs: &GlobalSystemLibs,
-) -> Result<()> {
+) -> Result<String> {
     let mut log = String::new();
     log.push_str(&format!("materializing {}\n", spec.package_id()));
     let previous_exports =
         read_export_manifest(depos_root, &spec.name, &spec.namespace, &spec.version)?;
+    let previous_state =
+        read_materialization_state(depos_root, &spec.name, &spec.namespace, &spec.version)?;
+    let depofile_hash = registered_depofile_hash(depos_root, spec)?;
+    let dependency_keys = dependency_materialization_keys(depos_root, spec)?;
+    let resolved_source = resolve_package_source(depos_root, spec, &mut log)?;
+    let build_key = materialization_build_key(
+        &depofile_hash,
+        &resolved_source.provenance,
+        &dependency_keys,
+    );
+    if materialization_is_current(
+        previous_state.as_ref(),
+        previous_exports.as_ref(),
+        store_root,
+        &depofile_hash,
+        &build_key,
+        spec,
+    )? {
+        log.push_str("materialization already up to date\n");
+        write_source_provenance(depos_root, spec, &resolved_source.provenance)?;
+        write_materialization_state(depos_root, spec, store_root, &depofile_hash, &build_key)?;
+        write_materialization_log(depos_root, spec, &log)?;
+        return Ok(format!(
+            "materialization already up to date under {}",
+            store_root.display()
+        ));
+    }
 
-    let (fetched_source_root, provenance) = acquire_package_source(depos_root, spec, &mut log)?;
-    let source_root = resolve_source_root(&fetched_source_root, spec)?;
-    write_source_provenance(depos_root, spec, &provenance)?;
+    prepare_package_source(&resolved_source.preparation, &mut log)?;
+    let source_root = resolve_source_root(&resolved_source.source_root, spec)?;
+    write_source_provenance(depos_root, spec, &resolved_source.provenance)?;
     let materialize_result = if spec.configure.is_empty()
         && spec.build.is_empty()
         && spec.install.is_empty()
@@ -890,7 +952,6 @@ fn materialize_local_package(
             store_root,
             spec,
             executable,
-            global_system_libs,
             &source_root,
             &mut log,
         )
@@ -910,6 +971,7 @@ fn materialize_local_package(
         &mut log,
     )?;
     write_export_manifest(depos_root, spec, store_root, &exported_paths)?;
+    write_materialization_state(depos_root, spec, store_root, &depofile_hash, &build_key)?;
 
     if !package_exports_present(spec, store_root)? {
         let message = format!(
@@ -923,7 +985,10 @@ fn materialize_local_package(
 
     log.push_str("materialization complete\n");
     write_materialization_log(depos_root, spec, &log)?;
-    Ok(())
+    Ok(format!(
+        "all declared exports are present under {}",
+        store_root.display()
+    ))
 }
 
 fn resolve_source_root(fetched_source_root: &Path, spec: &PackageSpec) -> Result<PathBuf> {
@@ -953,11 +1018,11 @@ fn resolve_source_root(fetched_source_root: &Path, spec: &PackageSpec) -> Result
     }
 }
 
-fn acquire_package_source(
+fn resolve_package_source(
     depos_root: &Path,
     spec: &PackageSpec,
     log: &mut String,
-) -> Result<(PathBuf, SourceProvenance)> {
+) -> Result<ResolvedSource> {
     let fetch = spec
         .fetch
         .as_ref()
@@ -973,18 +1038,26 @@ fn acquire_package_source(
 
     match fetch {
         FetchSpec::Git { url, reference } => {
-            fetch_git_source(
+            let desired_commit = resolve_git_source(
                 url,
                 reference,
                 spec.git_submodules_recursive,
                 &source_root,
                 log,
             )?;
-            let provenance = SourceProvenance {
-                source_ref: Some(reference.clone()),
-                source_commit: Some(resolve_checked_out_git_commit(&source_root)?),
-            };
-            Ok((source_root, provenance))
+            Ok(ResolvedSource {
+                source_root: source_root.clone(),
+                provenance: SourceProvenance {
+                    source_ref: Some(reference.clone()),
+                    source_commit: Some(desired_commit.clone()),
+                    source_digest: None,
+                },
+                preparation: SourcePreparationPlan::Git {
+                    source_root,
+                    desired_commit,
+                    submodules_recursive: spec.git_submodules_recursive,
+                },
+            })
         }
         FetchSpec::Url { url, sha256 } => {
             let archive_name = url
@@ -993,15 +1066,34 @@ fn acquire_package_source(
                 .filter(|value| !value.is_empty())
                 .unwrap_or("source.tar");
             let archive_path = download_root.join(archive_name);
-            fetch_url_source(url, sha256.as_deref(), &archive_path, &source_root, log)?;
-            Ok((
+            let archive_digest = resolve_url_source(url, sha256.as_deref(), &archive_path, log)?;
+            Ok(ResolvedSource {
                 source_root,
-                SourceProvenance {
+                provenance: SourceProvenance {
                     source_ref: Some(url.clone()),
                     source_commit: None,
+                    source_digest: Some(archive_digest),
                 },
-            ))
+                preparation: SourcePreparationPlan::Url {
+                    archive_path,
+                    source_root: download_root.join("src"),
+                },
+            })
         }
+    }
+}
+
+fn prepare_package_source(preparation: &SourcePreparationPlan, log: &mut String) -> Result<()> {
+    match preparation {
+        SourcePreparationPlan::Git {
+            source_root,
+            desired_commit,
+            submodules_recursive,
+        } => prepare_git_source(source_root, desired_commit, *submodules_recursive, log),
+        SourcePreparationPlan::Url {
+            archive_path,
+            source_root,
+        } => prepare_url_source(archive_path, source_root, log),
     }
 }
 
@@ -1010,7 +1102,6 @@ fn execute_command_pipeline(
     store_root: &Path,
     spec: &PackageSpec,
     executable: &Path,
-    global_system_libs: &GlobalSystemLibs,
     source_root: &Path,
     log: &mut String,
 ) -> Result<Vec<PathBuf>> {
@@ -1052,7 +1143,7 @@ fn execute_command_pipeline(
         .with_context(|| format!("failed to create {}", work_tmp.display()))?;
 
     let variables = build_command_variables(spec, &dependency_specs)?;
-    let base_env = build_command_environment(spec, global_system_libs, &dependency_specs);
+    let base_env = build_command_environment(spec, &dependency_specs);
     let mounts = build_command_mounts(spec, source_root, &variant_root)?;
     let emulator = prepare_command_emulator(&container_root, &host, spec, log)?;
     let phase_context = PhaseExecutionContext {
@@ -1287,7 +1378,6 @@ fn host_rust_toolchain_dir(env_var: &str, home_suffix: &str) -> Option<PathBuf> 
 
 fn build_command_environment(
     spec: &PackageSpec,
-    global_system_libs: &GlobalSystemLibs,
     dependency_specs: &[PackageSpec],
 ) -> Vec<(String, String)> {
     let dependency_roots = dependency_specs
@@ -1382,12 +1472,8 @@ fn build_command_environment(
         }
     }
     let effective_system_libs = match spec.system_libs {
-        PackageSystemLibs::Inherit => match global_system_libs {
-            GlobalSystemLibs::Never => PackageSystemLibs::Never,
-            GlobalSystemLibs::Allow => PackageSystemLibs::Allow,
-        },
-        PackageSystemLibs::Never => PackageSystemLibs::Never,
         PackageSystemLibs::Allow => PackageSystemLibs::Allow,
+        PackageSystemLibs::Inherit | PackageSystemLibs::Never => PackageSystemLibs::Never,
     };
     if effective_system_libs != PackageSystemLibs::Allow {
         env.extend([
@@ -1718,31 +1804,27 @@ fn prepend_path_entries(prefix: &str, fallback: &str) -> String {
     }
 }
 
-fn fetch_git_source(
+fn resolve_git_source(
     url: &str,
     reference: &str,
     submodules_recursive: bool,
     source_root: &Path,
     log: &mut String,
-) -> Result<()> {
-    log.push_str(&format!("fetch git {} {}\n", url, reference));
-    if !source_root.exists() {
-        if let Some(parent) = source_root.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+) -> Result<String> {
+    log.push_str(&format!("resolve git {} {}\n", url, reference));
+    let cloned = ensure_git_clone(url, source_root, log)?;
+    if is_full_git_commit_reference(reference) {
+        if let Some(commit) = resolve_git_commit_if_present(source_root, reference)? {
+            if commit.eq_ignore_ascii_case(reference) {
+                log.push_str(&format!(
+                    "reuse exact git commit {} without fetch\n",
+                    reference
+                ));
+                return Ok(commit);
+            }
         }
-        run_command(
-            log,
-            None,
-            "git",
-            vec![
-                "clone".to_string(),
-                url.to_string(),
-                source_root.display().to_string(),
-            ],
-            Some(source_root),
-        )?;
-    } else {
+    }
+    if !cloned {
         run_command(
             log,
             Some(source_root),
@@ -1752,15 +1834,65 @@ fn fetch_git_source(
         )?;
     }
     let checkout_reference = resolve_git_checkout_reference(source_root, reference)?;
-    log.push_str(&format!(
-        "checkout git ref {} via {}\n",
-        reference, checkout_reference
-    ));
+    let desired_commit = resolve_git_reference_to_commit(source_root, &checkout_reference)?;
+    if is_full_git_commit_reference(reference)
+        && desired_commit.eq_ignore_ascii_case(reference)
+        && git_submodules_ready(source_root, submodules_recursive)?
+    {
+        log.push_str(&format!(
+            "resolved exact git commit {} without additional fetch work\n",
+            reference
+        ));
+    }
+    Ok(desired_commit)
+}
+
+fn ensure_git_clone(url: &str, source_root: &Path, log: &mut String) -> Result<bool> {
+    if source_root.exists() {
+        if is_git_worktree(source_root) && git_remote_matches_url(source_root, url)? {
+            return Ok(false);
+        }
+        fs::remove_dir_all(source_root)
+            .with_context(|| format!("failed to remove {}", source_root.display()))?;
+    }
+    if let Some(parent) = source_root.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    run_command(
+        log,
+        None,
+        "git",
+        vec![
+            "clone".to_string(),
+            url.to_string(),
+            source_root.display().to_string(),
+        ],
+        Some(source_root),
+    )?;
+    Ok(true)
+}
+
+fn prepare_git_source(
+    source_root: &Path,
+    desired_commit: &str,
+    submodules_recursive: bool,
+    log: &mut String,
+) -> Result<()> {
+    let current_commit = resolve_checked_out_git_commit(source_root)?;
+    if current_commit == desired_commit
+        && git_worktree_clean(source_root)?
+        && git_submodules_ready(source_root, submodules_recursive)?
+    {
+        log.push_str(&format!("reuse clean git checkout {}\n", desired_commit));
+        return Ok(());
+    }
+    log.push_str(&format!("checkout git commit {}\n", desired_commit));
     run_command(
         log,
         Some(source_root),
         "git",
-        ["checkout", "--force", checkout_reference.as_str()],
+        ["checkout", "--force", desired_commit],
         None,
     )?;
     run_command(log, Some(source_root), "git", ["clean", "-fdx"], None)?;
@@ -1812,6 +1944,67 @@ fn resolve_checked_out_git_commit(source_root: &Path) -> Result<String> {
     Ok(commit.trim().to_string())
 }
 
+fn resolve_git_commit_if_present(source_root: &Path, reference: &str) -> Result<Option<String>> {
+    let verify_target = format!("{reference}^{{commit}}");
+    Ok(git_output(
+        source_root,
+        ["rev-parse", "--verify", "--quiet", verify_target.as_str()],
+    )?
+    .map(|value| value.trim().to_string()))
+}
+
+fn resolve_git_reference_to_commit(source_root: &Path, reference: &str) -> Result<String> {
+    let commit = git_output(source_root, ["rev-parse", reference])?.with_context(|| {
+        format!(
+            "unable to resolve git reference '{}' under {}",
+            reference,
+            source_root.display()
+        )
+    })?;
+    Ok(commit.trim().to_string())
+}
+
+fn is_full_git_commit_reference(reference: &str) -> bool {
+    reference.len() == 40
+        && reference
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+}
+
+fn is_git_worktree(source_root: &Path) -> bool {
+    source_root.join(".git").exists()
+}
+
+fn git_remote_matches_url(source_root: &Path, url: &str) -> Result<bool> {
+    Ok(
+        git_output(source_root, ["config", "--get", "remote.origin.url"])?
+            .map(|value| value.trim() == url)
+            .unwrap_or(false),
+    )
+}
+
+fn git_worktree_clean(source_root: &Path) -> Result<bool> {
+    Ok(git_output(
+        source_root,
+        ["status", "--porcelain", "--untracked-files=all"],
+    )?
+    .map(|value| value.trim().is_empty())
+    .unwrap_or(false))
+}
+
+fn git_submodules_ready(source_root: &Path, submodules_recursive: bool) -> Result<bool> {
+    if !submodules_recursive {
+        return Ok(true);
+    }
+    let Some(status) = git_output(source_root, ["submodule", "status", "--recursive"])? else {
+        return Ok(false);
+    };
+    Ok(status
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .all(|line| line.starts_with(' ')))
+}
+
 fn git_output<const N: usize>(current_dir: &Path, argv: [&str; N]) -> Result<Option<String>> {
     let executable_path = resolve_command_path("git");
     let output = Command::new(&executable_path)
@@ -1844,40 +2037,32 @@ fn git_status_success<const N: usize>(current_dir: &Path, argv: [&str; N]) -> Re
     Ok(status.success())
 }
 
-fn fetch_url_source(
+fn resolve_url_source(
     url: &str,
     sha256: Option<&str>,
     archive_path: &Path,
-    source_root: &Path,
     log: &mut String,
-) -> Result<()> {
-    log.push_str(&format!("fetch url {}\n", url));
+) -> Result<String> {
+    log.push_str(&format!("resolve url {}\n", url));
     if let Some(parent) = archive_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    run_command(
-        log,
-        None,
-        "curl",
-        [
-            "--fail",
-            "--location",
-            "--silent",
-            "--show-error",
-            "--output",
-            archive_path
-                .to_str()
-                .ok_or_else(|| anyhow!("non-utf8 archive path {}", archive_path.display()))?,
-            url,
-        ],
-        None,
-    )?;
-
     if let Some(expected) = sha256 {
-        let bytes = fs::read(archive_path)
-            .with_context(|| format!("failed to read {}", archive_path.display()))?;
-        let actual = format!("{:x}", Sha256::digest(bytes));
+        if archive_path.exists() {
+            let actual = hash_file_sha256(archive_path)?;
+            if actual == expected {
+                log.push_str(&format!(
+                    "reuse cached url archive {} with sha256 {}\n",
+                    archive_path.display(),
+                    expected
+                ));
+                validate_archive_entries(archive_path)?;
+                return Ok(actual);
+            }
+        }
+        download_url_archive(url, archive_path, log)?;
+        let actual = hash_file_sha256(archive_path)?;
         if actual != expected {
             bail!(
                 "downloaded archive '{}' sha256 mismatch: expected {}, got {}",
@@ -1886,16 +2071,41 @@ fn fetch_url_source(
                 actual
             );
         }
+        validate_archive_entries(archive_path)?;
+        return Ok(actual);
     }
 
-    validate_archive_entries(archive_path)?;
+    if let Some(local_path) = file_url_path(url) {
+        let expected = hash_file_sha256(&local_path)?;
+        if archive_path.exists() && hash_file_sha256(archive_path)? == expected {
+            log.push_str(&format!(
+                "reuse cached file url archive {} from {}\n",
+                archive_path.display(),
+                local_path.display()
+            ));
+            validate_archive_entries(archive_path)?;
+            return Ok(expected);
+        }
+    }
 
+    download_url_archive(url, archive_path, log)?;
+    let actual = hash_file_sha256(archive_path)?;
+    validate_archive_entries(archive_path)?;
+    Ok(actual)
+}
+
+fn prepare_url_source(archive_path: &Path, source_root: &Path, log: &mut String) -> Result<()> {
     if source_root.exists() {
         fs::remove_dir_all(source_root)
             .with_context(|| format!("failed to remove {}", source_root.display()))?;
     }
     fs::create_dir_all(source_root)
         .with_context(|| format!("failed to create {}", source_root.display()))?;
+    log.push_str(&format!(
+        "extract url archive {} -> {}\n",
+        archive_path.display(),
+        source_root.display()
+    ));
     run_command(
         log,
         None,
@@ -1914,6 +2124,30 @@ fn fetch_url_source(
         None,
     )?;
     Ok(())
+}
+
+fn download_url_archive(url: &str, archive_path: &Path, log: &mut String) -> Result<()> {
+    run_command(
+        log,
+        None,
+        "curl",
+        [
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--output",
+            archive_path
+                .to_str()
+                .ok_or_else(|| anyhow!("non-utf8 archive path {}", archive_path.display()))?,
+            url,
+        ],
+        None,
+    )
+}
+
+fn file_url_path(url: &str) -> Option<PathBuf> {
+    url.strip_prefix("file://").map(PathBuf::from)
 }
 
 fn validate_archive_entries(archive_path: &Path) -> Result<()> {
@@ -2613,6 +2847,11 @@ fn remove_existing_path(path: &Path) -> Result<()> {
     }
 }
 
+fn hash_file_sha256(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 fn run_command<I, S>(
     log: &mut String,
     current_dir: Option<&Path>,
@@ -2689,6 +2928,89 @@ fn package_exports_present(spec: &PackageSpec, store_root: &Path) -> Result<bool
         }
     }
     Ok(true)
+}
+
+fn registered_depofile_hash(depos_root: &Path, spec: &PackageSpec) -> Result<String> {
+    let path = registered_depofile_path(depos_root, &spec.name, &spec.namespace, &spec.version);
+    hash_file_sha256(&path)
+}
+
+fn dependency_materialization_keys(
+    depos_root: &Path,
+    spec: &PackageSpec,
+) -> Result<Vec<(String, String)>> {
+    let mut keys = resolve_dependency_specs(depos_root, spec)?
+        .into_iter()
+        .map(|dependency| {
+            let package_id = dependency.package_id();
+            let key = if dependency.origin == PackageOrigin::Local {
+                read_materialization_state(
+                    depos_root,
+                    &dependency.name,
+                    &dependency.namespace,
+                    &dependency.version,
+                )?
+                .with_context(|| {
+                    format!(
+                        "local dependency '{}' is missing materialization state",
+                        package_id
+                    )
+                })?
+                .build_key
+            } else {
+                package_id.clone()
+            };
+            Ok((package_id, key))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    keys.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(keys)
+}
+
+fn materialization_build_key(
+    depofile_hash: &str,
+    provenance: &SourceProvenance,
+    dependency_keys: &[(String, String)],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("depofile={depofile_hash}\n"));
+    hasher.update(format!(
+        "source_ref={}\n",
+        provenance.source_ref.as_deref().unwrap_or("")
+    ));
+    hasher.update(format!(
+        "source_commit={}\n",
+        provenance.source_commit.as_deref().unwrap_or("")
+    ));
+    hasher.update(format!(
+        "source_digest={}\n",
+        provenance.source_digest.as_deref().unwrap_or("")
+    ));
+    for (package_id, key) in dependency_keys {
+        hasher.update(format!("dependency={package_id}:{key}\n"));
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn materialization_is_current(
+    previous_state: Option<&MaterializationState>,
+    previous_exports: Option<&ExportManifest>,
+    store_root: &Path,
+    depofile_hash: &str,
+    build_key: &str,
+    spec: &PackageSpec,
+) -> Result<bool> {
+    let (Some(previous_state), Some(previous_exports)) = (previous_state, previous_exports) else {
+        return Ok(false);
+    };
+    if !store_root.exists() || !package_exports_present(spec, store_root)? {
+        return Ok(false);
+    }
+    let canonical_store_root = canonical_path(store_root)?;
+    Ok(previous_state.store_root == canonical_store_root
+        && previous_exports.store_root == canonical_store_root
+        && previous_state.depofile_hash == depofile_hash
+        && previous_state.build_key == build_key)
 }
 
 fn write_materialization_status(
@@ -2881,6 +3203,11 @@ fn write_source_provenance(
         contents.push_str(source_commit);
         contents.push('\n');
     }
+    if let Some(source_digest) = &provenance.source_digest {
+        contents.push_str("source_digest=");
+        contents.push_str(source_digest);
+        contents.push('\n');
+    }
     fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -2908,10 +3235,75 @@ fn read_source_provenance(
         match key {
             "source_ref" => provenance.source_ref = Some(value.to_string()),
             "source_commit" => provenance.source_commit = Some(value.to_string()),
+            "source_digest" => provenance.source_digest = Some(value.to_string()),
             _ => bail!("unsupported provenance key '{}' in {}", key, path.display()),
         }
     }
     Ok(provenance)
+}
+
+fn write_materialization_state(
+    depos_root: &Path,
+    spec: &PackageSpec,
+    store_root: &Path,
+    depofile_hash: &str,
+    build_key: &str,
+) -> Result<()> {
+    let path = materialization_state_path(depos_root, &spec.name, &spec.namespace, &spec.version);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("invalid materialization state path {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let contents = format!(
+        "store_root={}\ndepofile_hash={}\nbuild_key={}\n",
+        display_path(&canonical_path(store_root)?),
+        depofile_hash,
+        build_key
+    );
+    fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn read_materialization_state(
+    depos_root: &Path,
+    name: &str,
+    namespace: &str,
+    version: &str,
+) -> Result<Option<MaterializationState>> {
+    let path = materialization_state_path(depos_root, name, namespace, version);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut store_root = None;
+    let mut depofile_hash = None;
+    let mut build_key = None;
+    for raw_line in source.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (key, value) = line.split_once('=').with_context(|| {
+            format!("invalid materialization state syntax at {}", path.display())
+        })?;
+        match key {
+            "store_root" => store_root = Some(PathBuf::from(value)),
+            "depofile_hash" => depofile_hash = Some(value.to_string()),
+            "build_key" => build_key = Some(value.to_string()),
+            _ => bail!(
+                "unsupported materialization state key '{}' in {}",
+                key,
+                path.display()
+            ),
+        }
+    }
+    Ok(Some(MaterializationState {
+        store_root: store_root
+            .with_context(|| format!("missing store_root in {}", path.display()))?,
+        depofile_hash: depofile_hash
+            .with_context(|| format!("missing depofile_hash in {}", path.display()))?,
+        build_key: build_key.with_context(|| format!("missing build_key in {}", path.display()))?,
+    }))
 }
 
 fn remove_exported_paths(
@@ -3054,6 +3446,24 @@ pub fn unregister_depofile(options: &UnregisterOptions) -> Result<()> {
                 .parent()
                 .ok_or_else(|| anyhow!("invalid provenance path"))?,
             &depos_root.join(".run").join("provenance"),
+        )?;
+    }
+
+    let materialization_state_path = materialization_state_path(
+        &depos_root,
+        &options.name,
+        &options.namespace,
+        &options.version,
+    );
+    if materialization_state_path.exists() {
+        fs::remove_file(&materialization_state_path).with_context(|| {
+            format!("failed to remove {}", materialization_state_path.display())
+        })?;
+        prune_empty_ancestors(
+            materialization_state_path
+                .parent()
+                .ok_or_else(|| anyhow!("invalid materialization state path"))?,
+            &depos_root.join(".run").join("materialization"),
         )?;
     }
 
@@ -4788,7 +5198,6 @@ fn render_targets_cmake(
     depos_root: &Path,
     variant: &str,
     validate_file: &Path,
-    system_libs: GlobalSystemLibs,
     selected: &[ResolvedPackage],
 ) -> Result<String> {
     let dependency_links = dependency_primary_targets(selected);
@@ -4799,10 +5208,6 @@ fn render_targets_cmake(
     output.push_str(&format!(
         "set(DEPOS_REGISTRY_STORE_ROOT \"{}\")\n",
         cmake_escape(&display_path(&depos_root.join("store").join(variant)))
-    ));
-    output.push_str(&format!(
-        "set(DEPOS_REGISTRY_SYSTEM_LIBS \"{}\")\n",
-        system_libs.as_str()
     ));
     output.push_str(&format!(
         "include(\"{}\")\n",
@@ -5014,7 +5419,6 @@ fn render_lock_cmake(
     manifest: &Path,
     variant: &str,
     registry_dir: &Path,
-    system_libs: GlobalSystemLibs,
     selected: &[ResolvedPackage],
 ) -> String {
     let targets_file = registry_dir.join("targets.cmake");
@@ -5074,10 +5478,6 @@ fn render_lock_cmake(
     output.push_str(&format!(
         "set(DEPOS_REGISTRY_VARIANT \"{}\")\n",
         cmake_escape(variant)
-    ));
-    output.push_str(&format!(
-        "set(DEPOS_REGISTRY_SYSTEM_LIBS \"{}\")\n",
-        system_libs.as_str()
     ));
     output.push_str(&format!(
         "set(DEPOS_REGISTRY_STORE_ROOT \"{}\")\n",
@@ -5347,57 +5747,6 @@ fn resolve_depos_executable(override_path: Option<&Path>) -> Result<PathBuf> {
         return canonical_path(path);
     }
     std::env::current_exe().context("failed to locate depos executable")
-}
-
-fn resolve_global_system_libs(
-    depos_root: &Path,
-    override_value: Option<GlobalSystemLibs>,
-) -> Result<GlobalSystemLibs> {
-    if let Some(value) = override_value {
-        return Ok(value);
-    }
-    if let Ok(value) = std::env::var("DEPOS_SYSTEM_LIBS") {
-        if !value.is_empty() {
-            return GlobalSystemLibs::parse(&value);
-        }
-    }
-    let config = read_repo_config(depos_root)?;
-    if let Some(value) = config.system_libs {
-        return Ok(value);
-    }
-    Ok(GlobalSystemLibs::Never)
-}
-
-fn read_repo_config(depos_root: &Path) -> Result<RepoConfig> {
-    let path = depos_root.join("depos.env.cmake");
-    if !path.exists() {
-        return Ok(RepoConfig::default());
-    }
-    let source =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut config = RepoConfig::default();
-
-    for line in significant_lines(&source) {
-        if !line.text.starts_with("set(") || !line.text.ends_with(')') {
-            continue;
-        }
-        let inner = &line.text[4..line.text.len() - 1];
-        let tokens = tokenize_arguments(inner).with_context(|| {
-            format!(
-                "invalid config syntax at {}:{}",
-                path.display(),
-                line.number
-            )
-        })?;
-        if tokens.len() != 2 {
-            continue;
-        }
-        if tokens[0].as_str() == "DEPOS_SYSTEM_LIBS" {
-            config.system_libs = Some(GlobalSystemLibs::parse(&tokens[1])?);
-        }
-    }
-
-    Ok(config)
 }
 
 fn manifest_profile(path: &Path) -> Result<String> {
@@ -6572,6 +6921,20 @@ fn provenance_file_path(depos_root: &Path, name: &str, namespace: &str, version:
         .join(name)
         .join(namespace)
         .join(format!("{version}.source"))
+}
+
+fn materialization_state_path(
+    depos_root: &Path,
+    name: &str,
+    namespace: &str,
+    version: &str,
+) -> PathBuf {
+    depos_root
+        .join(".run")
+        .join("materialization")
+        .join(name)
+        .join(namespace)
+        .join(format!("{version}.state"))
 }
 
 fn prune_empty_ancestors(path: &Path, stop_at: &Path) -> Result<()> {

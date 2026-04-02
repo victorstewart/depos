@@ -81,7 +81,7 @@ while (($#)); do
 done
 
 test -n "$root"
-test "$version" = "0.3.0"
+test "$version" = "0.4.0"
 test "$crate" = "depos"
 mkdir -p "$root/bin"
 cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"

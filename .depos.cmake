@@ -21,6 +21,11 @@ function(_depos_repo_root out_var)
   set(${out_var} "${_depos_repo_root}" PARENT_SCOPE)
 endfunction()
 
+function(_depos_project_defaults_file out_var)
+  _depos_repo_root(_depos_project_root)
+  set(${out_var} "${_depos_project_root}/depos.project.cmake" PARENT_SCOPE)
+endfunction()
+
 function(_depos_default_bootstrap_dir out_var)
   _depos_module_dir(_depos_module_dir)
   get_filename_component(_depos_module_name "${_depos_module_dir}" NAME)
@@ -45,6 +50,11 @@ function(_depos_make_absolute out_var path_value)
   get_filename_component(_depos_absolute "${path_value}" ABSOLUTE BASE_DIR "${CMAKE_BINARY_DIR}")
   set(${out_var} "${_depos_absolute}" PARENT_SCOPE)
 endfunction()
+
+_depos_project_defaults_file(_depos_project_defaults)
+if (EXISTS "${_depos_project_defaults}")
+  include("${_depos_project_defaults}" OPTIONAL)
+endif()
 
 function(_depos_make_absolute_from_base out_var path_value base_dir)
   if ("${path_value}" STREQUAL "")
@@ -90,6 +100,32 @@ function(_depos_global_property_length out_var property_name)
   set(${out_var} "${_depos_items_count}" PARENT_SCOPE)
 endfunction()
 
+function(_depos_cache_property_name out_var prefix key)
+  string(SHA256 _depos_cache_hash "${prefix}|${key}")
+  set(${out_var} "${prefix}_${_depos_cache_hash}" PARENT_SCOPE)
+endfunction()
+
+function(_depos_mark_sync_dirty)
+  set_property(GLOBAL PROPERTY DEPOS_SYNC_DIRTY TRUE)
+endfunction()
+
+function(_depos_clear_sync_dirty)
+  set_property(GLOBAL PROPERTY DEPOS_SYNC_DIRTY FALSE)
+endfunction()
+
+function(_depos_ensure_registry_ready)
+  get_property(_depos_lines GLOBAL PROPERTY DEPOS_REQUEST_LINES)
+  if (NOT _depos_lines)
+    return()
+  endif()
+
+  get_property(_depos_dirty GLOBAL PROPERTY DEPOS_SYNC_DIRTY)
+  get_property(_depos_registry_dir GLOBAL PROPERTY DEPOS_ACTIVE_REGISTRY_DIR)
+  if ("${_depos_dirty}" STREQUAL "TRUE" OR "${_depos_registry_dir}" STREQUAL "")
+    _depos_sync_current_requests()
+  endif()
+endfunction()
+
 function(_depos_default_project_namespace out_var)
   if (DEFINED PROJECT_NAME AND NOT "${PROJECT_NAME}" STREQUAL "")
     set(_depos_namespace "${PROJECT_NAME}")
@@ -111,7 +147,7 @@ endfunction()
 if (NOT DEFINED DEPOS_BOOTSTRAP_VERSION OR DEPOS_BOOTSTRAP_VERSION STREQUAL "")
   set(
     DEPOS_BOOTSTRAP_VERSION
-    "0.3.0"
+    "0.4.0"
     CACHE STRING
     "Pinned depos version used when bootstrapping locally with Cargo"
   )
@@ -164,16 +200,7 @@ if (NOT DEFINED DEPOS_PROJECT_NAMESPACE OR DEPOS_PROJECT_NAMESPACE STREQUAL "")
   )
 endif()
 
-function(_depos_include_repo_env)
-  _depos_repo_root(_depos_root)
-  if (EXISTS "${_depos_root}/depos.env.cmake")
-    include("${_depos_root}/depos.env.cmake" OPTIONAL)
-  endif()
-endfunction()
-
 function(depos_default_root out_var)
-  _depos_include_repo_env()
-
   if (DEFINED DEPOS_ROOT AND NOT "${DEPOS_ROOT}" STREQUAL "")
     set(_depos_runtime_root "${DEPOS_ROOT}")
   elseif (DEFINED ENV{DEPOS_ROOT} AND NOT "$ENV{DEPOS_ROOT}" STREQUAL "")
@@ -186,21 +213,6 @@ function(depos_default_root out_var)
 
   _depos_make_absolute(_depos_runtime_root "${_depos_runtime_root}")
   set(${out_var} "${_depos_runtime_root}" PARENT_SCOPE)
-endfunction()
-
-function(depos_default_system_libs out_var)
-  _depos_include_repo_env()
-
-  if (DEFINED DEPOS_SYSTEM_LIBS AND NOT "${DEPOS_SYSTEM_LIBS}" STREQUAL "")
-    set(_depos_system_libs "${DEPOS_SYSTEM_LIBS}")
-  elseif (DEFINED ENV{DEPOS_SYSTEM_LIBS} AND NOT "$ENV{DEPOS_SYSTEM_LIBS}" STREQUAL "")
-    set(_depos_system_libs "$ENV{DEPOS_SYSTEM_LIBS}")
-  else()
-    set(_depos_system_libs "NEVER")
-  endif()
-
-  string(TOLOWER "${_depos_system_libs}" _depos_system_libs)
-  set(${out_var} "${_depos_system_libs}" PARENT_SCOPE)
 endfunction()
 
 function(depos_default_variant out_var)
@@ -538,6 +550,19 @@ function(_depos_default_depofiles_dir out_var)
 endfunction()
 
 function(_depos_parse_depofile_metadata out_name out_version out_target depofile)
+  _depos_make_absolute_from_base(_depos_cached_depofile "${depofile}" "${CMAKE_CURRENT_SOURCE_DIR}")
+  _depos_cache_property_name(_depos_metadata_property "DEPOS_DEPOFILE_METADATA" "${_depos_cached_depofile}")
+  get_property(_depos_metadata_cached GLOBAL PROPERTY "${_depos_metadata_property}_NAME" SET)
+  if (_depos_metadata_cached)
+    get_property(_depos_name GLOBAL PROPERTY "${_depos_metadata_property}_NAME")
+    get_property(_depos_version GLOBAL PROPERTY "${_depos_metadata_property}_VERSION")
+    get_property(_depos_target GLOBAL PROPERTY "${_depos_metadata_property}_TARGET")
+    set(${out_name} "${_depos_name}" PARENT_SCOPE)
+    set(${out_version} "${_depos_version}" PARENT_SCOPE)
+    set(${out_target} "${_depos_target}" PARENT_SCOPE)
+    return()
+  endif()
+
   file(STRINGS "${depofile}" _depos_name_line REGEX "^NAME[ \t]+[^ \t\r\n]+$" LIMIT_COUNT 1)
   file(STRINGS "${depofile}" _depos_version_line REGEX "^VERSION[ \t]+[^ \t\r\n]+$" LIMIT_COUNT 1)
   file(STRINGS "${depofile}" _depos_primary_line REGEX "^PRIMARY_TARGET[ \t]+[^ \t\r\n]+$" LIMIT_COUNT 1)
@@ -558,6 +583,9 @@ function(_depos_parse_depofile_metadata out_name out_version out_target depofile
     set(_depos_target "")
   endif()
 
+  set_property(GLOBAL PROPERTY "${_depos_metadata_property}_NAME" "${_depos_name}")
+  set_property(GLOBAL PROPERTY "${_depos_metadata_property}_VERSION" "${_depos_version}")
+  set_property(GLOBAL PROPERTY "${_depos_metadata_property}_TARGET" "${_depos_target}")
   set(${out_name} "${_depos_name}" PARENT_SCOPE)
   set(${out_version} "${_depos_version}" PARENT_SCOPE)
   set(${out_target} "${_depos_target}" PARENT_SCOPE)
@@ -575,6 +603,14 @@ function(_depos_depofile_entries out_var search_root)
     return()
   endif()
 
+  _depos_cache_property_name(_depos_entries_property "DEPOS_DEPOFILE_ENTRIES" "${_depos_search_root}")
+  get_property(_depos_entries_cached GLOBAL PROPERTY "${_depos_entries_property}" SET)
+  if (_depos_entries_cached)
+    get_property(_depos_cached_entries GLOBAL PROPERTY "${_depos_entries_property}")
+    set(${out_var} "${_depos_cached_entries}" PARENT_SCOPE)
+    return()
+  endif()
+
   file(
     GLOB_RECURSE _depos_depofiles
     LIST_DIRECTORIES false
@@ -588,6 +624,7 @@ function(_depos_depofile_entries out_var search_root)
     list(APPEND _depos_entries "${_depos_name}|${_depos_version}|${_depos_target}|${_depos_depofile}")
   endforeach()
 
+  set_property(GLOBAL PROPERTY "${_depos_entries_property}" "${_depos_entries}")
   set(${out_var} "${_depos_entries}" PARENT_SCOPE)
 endfunction()
 
@@ -723,6 +760,15 @@ function(_depos_depofile_search_root_from_path out_var depofile)
 endfunction()
 
 function(_depos_depofile_dependency_entries out_var depofile)
+  _depos_make_absolute_from_base(_depos_cached_depofile "${depofile}" "${CMAKE_CURRENT_SOURCE_DIR}")
+  _depos_cache_property_name(_depos_dependencies_property "DEPOS_DEPOFILE_DEPENDENCIES" "${_depos_cached_depofile}")
+  get_property(_depos_dependencies_cached GLOBAL PROPERTY "${_depos_dependencies_property}" SET)
+  if (_depos_dependencies_cached)
+    get_property(_depos_cached_dependencies GLOBAL PROPERTY "${_depos_dependencies_property}")
+    set(${out_var} "${_depos_cached_dependencies}" PARENT_SCOPE)
+    return()
+  endif()
+
   file(STRINGS "${depofile}" _depos_dependency_lines REGEX "^DEPENDS[ \t]+")
   set(_depos_dependency_entries "")
   foreach(_depos_dependency_line IN LISTS _depos_dependency_lines)
@@ -734,6 +780,7 @@ function(_depos_depofile_dependency_entries out_var depofile)
     list(APPEND _depos_dependency_entries "${_depos_dependency_name}|${_depos_dependency_version}")
   endforeach()
 
+  set_property(GLOBAL PROPERTY "${_depos_dependencies_property}" "${_depos_dependency_entries}")
   set(${out_var} "${_depos_dependency_entries}" PARENT_SCOPE)
 endfunction()
 
@@ -755,6 +802,7 @@ function(_depos_add_pending_depofile depofile name version target root local_mod
     list(FIND _depos_pending "${_depos_entry}" _depos_pending_index)
     if (_depos_pending_index EQUAL -1)
       set_property(GLOBAL APPEND PROPERTY DEPOS_PENDING_DEPOFILES "${_depos_entry}")
+      _depos_mark_sync_dirty()
     endif()
   endif()
 
@@ -814,6 +862,7 @@ function(_depos_append_request_line line)
   list(FIND _depos_lines "${line}" _depos_line_index)
   if (_depos_line_index EQUAL -1)
     set_property(GLOBAL APPEND PROPERTY DEPOS_REQUEST_LINES "${line}")
+    _depos_mark_sync_dirty()
   endif()
 endfunction()
 
@@ -833,30 +882,19 @@ function(_depos_write_generated_manifest out_var)
   set(${out_var} "${_depos_manifest_path}" PARENT_SCOPE)
 endfunction()
 
-function(_depos_cli_registry_dir out_var executable_path depos_root manifest_path)
-  execute_process(
-    COMMAND
-      "${executable_path}"
-      registry-dir
-      --depos-root
-      "${depos_root}"
-      --manifest
-      "${manifest_path}"
-    RESULT_VARIABLE _depos_registry_result
-    OUTPUT_VARIABLE _depos_registry_stdout
-    ERROR_VARIABLE _depos_registry_stderr
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-  if (NOT _depos_registry_result EQUAL 0)
-    message(
-      FATAL_ERROR
-      "Failed to resolve the depos registry directory.\n"
-      "stdout:\n${_depos_registry_stdout}\n"
-      "stderr:\n${_depos_registry_stderr}"
-    )
-  endif()
+function(_depos_registry_dir_from_sync_stdout out_var sync_stdout)
+  string(REPLACE "\r\n" "\n" _depos_sync_stdout "${sync_stdout}")
+  string(REPLACE "\r" "\n" _depos_sync_stdout "${_depos_sync_stdout}")
+  string(REPLACE "\n" ";" _depos_sync_lines "${_depos_sync_stdout}")
+  foreach(_depos_line IN LISTS _depos_sync_lines)
+    string(STRIP "${_depos_line}" _depos_line)
+    if (NOT "${_depos_line}" STREQUAL "")
+      set(${out_var} "${_depos_line}" PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
 
-  set(${out_var} "${_depos_registry_stdout}" PARENT_SCOPE)
+  message(FATAL_ERROR "depos sync did not print a registry directory.")
 endfunction()
 
 function(_depos_include_registry registry_dir)
@@ -915,7 +953,6 @@ function(_depos_sync_current_requests)
   _depos_global_property_length(_depos_request_count DEPOS_REQUEST_LINES)
   _depos_runtime_mode_label(_depos_runtime_label ${_depos_local_mode})
   _depos_status("syncing ${_depos_request_count} dependency request(s) with ${_depos_runtime_label} depos")
-  depos_default_system_libs(_depos_system_libs)
   _depos_register_pending_depofiles("${_depos_executable}" "${_depos_root}" ${_depos_local_mode})
 
   execute_process(
@@ -926,8 +963,6 @@ function(_depos_sync_current_requests)
       "${_depos_root}"
       --manifest
       "${_depos_manifest_path}"
-      --system-libs
-      "${_depos_system_libs}"
     RESULT_VARIABLE _depos_sync_result
     OUTPUT_VARIABLE _depos_sync_stdout
     ERROR_VARIABLE _depos_sync_stderr
@@ -941,13 +976,10 @@ function(_depos_sync_current_requests)
     )
   endif()
 
-  _depos_cli_registry_dir(
-    _depos_registry_dir
-    "${_depos_executable}"
-    "${_depos_root}"
-    "${_depos_manifest_path}"
-  )
+  _depos_registry_dir_from_sync_stdout(_depos_registry_dir "${_depos_sync_stdout}")
   _depos_include_registry("${_depos_registry_dir}")
+  set_property(GLOBAL PROPERTY DEPOS_ACTIVE_REGISTRY_DIR "${_depos_registry_dir}")
+  _depos_clear_sync_dirty()
   _depos_status("loaded registry targets from ${_depos_registry_dir}")
 endfunction()
 
@@ -960,7 +992,7 @@ function(_depos_manifest_line_from_depofile out_var name version visible_namespa
   set(${out_var} "${_depos_line}" PARENT_SCOPE)
 endfunction()
 
-function(depos_depend dep)
+function(_depos_depend_single dep)
   if ("${dep}" STREQUAL "")
     message(FATAL_ERROR "depos_depend requires a package name or DepoFile path.")
   endif()
@@ -1063,7 +1095,58 @@ function(depos_depend dep)
 
   _depos_status("requesting ${_depos_status_request}")
   _depos_append_request_line("${_depos_line}")
-  _depos_sync_current_requests()
+endfunction()
+
+function(depos_depend)
+  if (ARGC EQUAL 0)
+    message(FATAL_ERROR "depos_depend requires a package name, DepoFile path, FILE, or FILES.")
+  endif()
+
+  set(options)
+  set(oneValueArgs PATH NAMESPACE VERSION MIN_VERSION SOURCE AS FILE)
+  set(multiValueArgs FILES)
+  cmake_parse_arguments(DEPOS_DEPEND "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  set(_depos_files "")
+  if (NOT "${DEPOS_DEPEND_FILE}" STREQUAL "")
+    list(APPEND _depos_files "${DEPOS_DEPEND_FILE}")
+  endif()
+  if (DEPOS_DEPEND_FILES)
+    list(APPEND _depos_files ${DEPOS_DEPEND_FILES})
+  endif()
+
+  if (_depos_files)
+    if (DEPOS_DEPEND_UNPARSED_ARGUMENTS)
+      message(FATAL_ERROR "depos_depend(FILE/FILES ...) does not accept positional package names or DepoFile paths.")
+    endif()
+    foreach(_depos_key IN ITEMS PATH NAMESPACE VERSION MIN_VERSION SOURCE AS)
+      if (NOT "${DEPOS_DEPEND_${_depos_key}}" STREQUAL "")
+        message(FATAL_ERROR "depos_depend(FILE/FILES ...) only accepts DepoFile paths.")
+      endif()
+    endforeach()
+    foreach(_depos_file IN LISTS _depos_files)
+      _depos_depend_single("${_depos_file}")
+    endforeach()
+    return()
+  endif()
+
+  list(LENGTH DEPOS_DEPEND_UNPARSED_ARGUMENTS _depos_unparsed_count)
+  if (_depos_unparsed_count EQUAL 0)
+    message(FATAL_ERROR "depos_depend requires a package name or DepoFile path.")
+  endif()
+  if (_depos_unparsed_count GREATER 1)
+    message(FATAL_ERROR "depos_depend accepts one package name or DepoFile path unless FILES is used.")
+  endif()
+
+  set(_depos_forward_args "")
+  foreach(_depos_key IN ITEMS PATH NAMESPACE VERSION MIN_VERSION SOURCE AS)
+    if (NOT "${DEPOS_DEPEND_${_depos_key}}" STREQUAL "")
+      list(APPEND _depos_forward_args "${_depos_key}" "${DEPOS_DEPEND_${_depos_key}}")
+    endif()
+  endforeach()
+
+  list(GET DEPOS_DEPEND_UNPARSED_ARGUMENTS 0 _depos_dep)
+  _depos_depend_single("${_depos_dep}" ${_depos_forward_args})
 endfunction()
 
 function(depos_depend_all)
@@ -1117,8 +1200,6 @@ function(depos_depend_all)
     _depos_manifest_line_from_depofile(_depos_line "${_depos_name}" "${_depos_version}" "${_depos_visible_namespace}")
     _depos_append_request_line("${_depos_line}")
   endforeach()
-
-  _depos_sync_current_requests()
 endfunction()
 
 function(depos_link target_name)
@@ -1144,6 +1225,8 @@ function(depos_link target_name)
   if (NOT _depos_items)
     message(FATAL_ERROR "depos_link requires at least one dependency or imported target.")
   endif()
+
+  _depos_ensure_registry_ready()
 
   set(_depos_targets "")
   foreach(_depos_item IN LISTS _depos_items)
@@ -1189,6 +1272,8 @@ function(depos_link_all target_name)
     message(FATAL_ERROR "depos_link_all requires at least one known DepoFile primary target.")
   endif()
 
+  _depos_ensure_registry_ready()
+
   target_link_libraries("${target_name}" ${_depos_visibility} ${_depos_targets})
 endfunction()
 
@@ -1213,7 +1298,6 @@ function(depos_use)
 
   _depos_make_absolute_from_base(_depos_manifest "${DEPOS_USE_MANIFEST}" "${CMAKE_CURRENT_SOURCE_DIR}")
   _depos_resolve_runtime(_depos_executable _depos_root _depos_local_mode _depos_namespace)
-  depos_default_system_libs(_depos_system_libs)
   execute_process(
     COMMAND
       "${_depos_executable}"
@@ -1222,8 +1306,6 @@ function(depos_use)
       "${_depos_root}"
       --manifest
       "${_depos_manifest}"
-      --system-libs
-      "${_depos_system_libs}"
     RESULT_VARIABLE _depos_sync_result
     OUTPUT_VARIABLE _depos_sync_stdout
     ERROR_VARIABLE _depos_sync_stderr
@@ -1237,6 +1319,6 @@ function(depos_use)
     )
   endif()
 
-  _depos_cli_registry_dir(_depos_registry_dir "${_depos_executable}" "${_depos_root}" "${_depos_manifest}")
+  _depos_registry_dir_from_sync_stdout(_depos_registry_dir "${_depos_sync_stdout}")
   _depos_include_registry("${_depos_registry_dir}")
 endfunction()

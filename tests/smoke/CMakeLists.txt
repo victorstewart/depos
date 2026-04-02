@@ -13,7 +13,7 @@ file(MAKE_DIRECTORY "${DEPOS_ROOT}/depofiles")
 file(COPY "${CMAKE_CURRENT_LIST_DIR}/fixtures/local" DESTINATION "${DEPOS_ROOT}/depofiles")
 
 include("${CMAKE_CURRENT_LIST_DIR}/../../.depos.cmake")
-set(DEPOS_SMOKE_STYLE "all" CACHE STRING "Smoke style: all or explicit")
+set(DEPOS_SMOKE_STYLE "all" CACHE STRING "Smoke style: all, explicit, or files")
 if (NOT DEFINED DEPOS_DEPOFILES_DIR OR DEPOS_DEPOFILES_DIR STREQUAL "")
   set(DEPOS_DEPOFILES_DIR "${DEPOS_ROOT}/depofiles/local" CACHE PATH "Smoke depofile directory" FORCE)
 endif()
@@ -24,6 +24,13 @@ elseif (DEPOS_SMOKE_STYLE STREQUAL "explicit")
   depos_depend(bitsery)
   depos_depend(itoa)
   depos_depend(zlib VERSION 1.3.2)
+elseif (DEPOS_SMOKE_STYLE STREQUAL "files")
+  depos_depend(
+    FILES
+    "${DEPOS_DEPOFILES_DIR}/bitsery/release/5.2.3/main.DepoFile"
+    "${DEPOS_DEPOFILES_DIR}/itoa/release/main/main.DepoFile"
+    "${DEPOS_DEPOFILES_DIR}/zlib/release/1.3.2/main.DepoFile"
+  )
 else()
   message(FATAL_ERROR "Unsupported DEPOS_SMOKE_STYLE: ${DEPOS_SMOKE_STYLE}")
 endif()

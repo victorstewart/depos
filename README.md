@@ -2,7 +2,7 @@
 
 `depos` is an external dependency builder and repository manager for C and C++ projects.
 
-You describe a dependency once in a small line-oriented `DepoFile`. `depos` fetches the source, builds it in an isolated Linux runtime, publishes the result into a versioned repository, and generates a CMake registry that consumer projects can import from a manifest.
+You describe a dependency once in a small line-oriented `DepoFile`. `depos` fetches the source, builds it in an isolated Linux runtime, publishes the result into a versioned repository, reuses unchanged local materializations and cached sources, and generates a CMake registry that consumer projects can import from a manifest. Changing the registered `DepoFile`, the resolved source, or a local dependency forces rematerialization.
 
 ## Distribution contract
 
@@ -10,11 +10,11 @@ You describe a dependency once in a small line-oriented `DepoFile`. `depos` fetc
 
 Preferred resolution order for consumer projects:
 
-1. default project-local `cargo install depos --version 0.3.0`
+1. default project-local `cargo install depos --version 0.4.0`
 2. explicit override such as `DEPOS_EXECUTABLE`
 3. optional system `depos` on `PATH` if you opt into it
 
-Primary distribution is GitHub release binaries. `cargo install depos --version 0.3.0` is the convenience path and the same version `.depos.cmake` bootstraps locally by default.
+Primary distribution is GitHub release binaries. `cargo install depos --version 0.4.0` is the convenience path and the same version `.depos.cmake` bootstraps locally by default.
 
 ## Root
 
@@ -68,10 +68,15 @@ depos_link(app bitsery itoa zlib)
 
 `depos_depend_all()` scans the public top-level `depofiles/` directory next to `.depos.cmake` by default. `depos_link_all(<target>)` links every known primary target from those `DepoFile`s. `depos_link(<target> ...)` links specific package names or imported target names. Both link helpers default to `PUBLIC`; pass `PRIVATE` immediately after the target name if you want to stop propagation.
 
-`depos_depend(...)` can take a single `DepoFile` path, and `depos_depend_all(...)` can take a depofiles directory path only:
+`depos_depend(...)` and `depos_depend_all(...)` queue requests during configure and `.depos.cmake` syncs them once, lazily, on the first `depos_link(...)` or `depos_link_all(...)` that needs the registry. Imported targets from queued requests are not guaranteed to exist until that first `depos_link*` call or `depos_use(MANIFEST ...)` performs the sync. `depos_depend(...)` can take a single `DepoFile` path, and `depos_depend(FILES ...)` batches multiple explicit `DepoFile` paths into that same queued request set. `depos_depend(FILE ...)` is the single-item alias for that same path. `depos_depend_all(...)` still only accepts a depofiles directory path:
 
 ```cmake
 depos_depend("${CMAKE_CURRENT_SOURCE_DIR}/depofiles/zlib.DepoFile")
+depos_depend(
+  FILES
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/depofiles/zlib.DepoFile"
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/depofiles/openssl.DepoFile"
+)
 depos_depend_all("${CMAKE_CURRENT_SOURCE_DIR}/third_party/depofiles")
 ```
 
@@ -96,14 +101,20 @@ depos_depend("${CMAKE_CURRENT_SOURCE_DIR}/third_party/cascade_lib.DepoFile")
 depos_link(app cascade_lib)
 ```
 
-During configure, `.depos.cmake` emits `depos:` status lines while it bootstraps the tool, registers local `DepoFile`s, and syncs the registry so dependency work does not look stalled.
+During configure, `.depos.cmake` emits `depos:` status lines while it bootstraps the tool, queues dependency requests, and performs the one lazy registry sync before first use so dependency work does not look stalled.
 
-By default `.depos.cmake` bootstraps `depos 0.3.0` into a hidden top-level `.depos/` directory next to the helper, keeps the local registry under that same hidden root, and records the selected mode in `.depos/.state.cmake`. Library maintainers should put `.depos.cmake` at the top of the repo before publishing the library and keep dependency `DepoFile`s in the public top-level `depofiles/` directory beside it so consumer builds can self-bootstrap from that location and just work.
+By default `.depos.cmake` bootstraps `depos 0.4.0` into a hidden top-level `.depos/` directory next to the helper, keeps the local registry under that same hidden root, and records the selected mode in `.depos/.state.cmake`. Library maintainers should put `.depos.cmake` at the top of the repo before publishing the library and keep dependency `DepoFile`s in the public top-level `depofiles/` directory beside it so consumer builds can self-bootstrap from that location and just work.
+
+If a repo wants to pin `.depos.cmake` defaults without setting them in `CMakeLists.txt`, put a top-level `depos.project.cmake` next to `.depos.cmake`:
+
+```cmake
+set(DEPOS_BOOTSTRAP_VERSION "0.4.0" CACHE STRING "Pinned depos version used by this project" FORCE)
+```
 
 If you want a shared system install instead, install the tool yourself and point CMake at it explicitly:
 
 ```bash
-cargo install depos --version 0.3.0
+cargo install depos --version 0.4.0
 ```
 
 Then set `DEPOS_EXECUTABLE` and, if you want a shared registry/root, `DEPOS_ROOT`.
