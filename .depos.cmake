@@ -389,10 +389,14 @@ function(_depos_bootstrap_with_cargo out_var)
 
   _depos_bootstrap_binary_path(_depos_bootstrap_binary)
   file(MAKE_DIRECTORY "${DEPOS_BOOTSTRAP_DIR}/.tool")
+  set(_depos_cargo_command "${_depos_cargo_executable}")
+  if (WIN32 AND "${_depos_cargo_executable}" MATCHES "\\.(cmd|bat)$")
+    set(_depos_cargo_command cmd /c "${_depos_cargo_executable}")
+  endif()
 
   execute_process(
     COMMAND
-      "${_depos_cargo_executable}"
+      ${_depos_cargo_command}
       install
       --locked
       --root
