@@ -1,0 +1,12 @@
+NAME libevent
+VERSION 2.1.12
+SYSTEM_LIBS ALLOW
+SOURCE URL https://github.com/libevent/libevent/releases/download/release-2.1.12-stable/libevent-2.1.12-stable.tar.gz
+BUILD_SYSTEM AUTOCONF
+AUTOCONF_ARG --disable-openssl
+AUTOCONF_ARG --disable-debug-mode
+AUTOCONF_ARG --disable-libevent-regress
+AUTOCONF_ARG --disable-samples
+TARGET libevent::event SHARED lib/libevent.so INTERFACE include
+TARGET libevent::event_pthreads SHARED lib/libevent_pthreads.so INTERFACE include
+LINK libevent::event_pthreads libevent::event

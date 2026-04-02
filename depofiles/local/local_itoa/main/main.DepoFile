@@ -1,0 +1,5 @@
+NAME local_itoa
+VERSION main
+SYSTEM_LIBS INHERIT
+SOURCE GIT https://github.com/jeaiii/itoa.git main
+TARGET itoa::itoa INTERFACE include

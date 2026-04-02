@@ -1,0 +1,25 @@
+NAME nghttp2
+VERSION 1.64.0
+SYSTEM_LIBS ALLOW
+DEPENDS openssl VERSION 3.4.1
+SOURCE URL https://github.com/nghttp2/nghttp2/releases/download/v1.64.0/nghttp2-1.64.0.tar.gz
+BUILD_SYSTEM AUTOCONF
+AUTOCONF_CONFIGURE_SH <<'EOF'
+mkdir -p "${DEPO_BUILD_DIR}"
+cd "${DEPO_BUILD_DIR}"
+
+env \
+  PKG_CONFIG_DIR= \
+  PKG_CONFIG_LIBDIR="${DEPO_DEP_OPENSSL_NAMETAG_ROOT}/lib/pkgconfig" \
+  CPPFLAGS="-I${DEPO_DEP_OPENSSL_NAMETAG_ROOT}/include" \
+  CFLAGS=-fPIC \
+  LDFLAGS="-L${DEPO_DEP_OPENSSL_NAMETAG_ROOT}/lib" \
+  "${DEPO_SOURCE_DIR}/configure" \
+  --enable-lib-only \
+  --enable-shared=no \
+  --prefix="${DEPO_PREFIX}" \
+  --with-openssl="${DEPO_DEP_OPENSSL_NAMETAG_ROOT}"
+EOF
+AUTOCONF_BUILD make -C ${DEPO_BUILD_DIR} -j$(nproc)
+AUTOCONF_INSTALL make -C ${DEPO_BUILD_DIR} install
+TARGET nghttp2::nghttp2 STATIC lib/libnghttp2.a INTERFACE include

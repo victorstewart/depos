@@ -1,0 +1,11 @@
+NAME liburing
+VERSION 2.9
+SYSTEM_LIBS ALLOW
+SOURCE URL https://github.com/axboe/liburing/archive/refs/tags/liburing-2.9.tar.gz
+BUILD_SYSTEM AUTOCONF
+AUTOCONF_INSTALL_SH <<'EOF'
+make install
+mkdir -p "${DEPO_PREFIX}/include/liburing"
+mv -f "${DEPO_PREFIX}/include/liburing.h" "${DEPO_PREFIX}/include/liburing/liburing.h"
+EOF
+TARGET liburing::liburing STATIC lib/liburing.a INTERFACE include

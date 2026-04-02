@@ -10,11 +10,11 @@ You describe a dependency once in a small line-oriented `DepoFile`. `depos` fetc
 
 Preferred resolution order for consumer projects:
 
-1. explicit override such as `DEPOS_EXECUTABLE`
-2. compatible `depos` on `PATH`
-3. pinned project-local binary download
+1. default project-local `cargo install depos --version 0.3.0`
+2. explicit override such as `DEPOS_EXECUTABLE`
+3. optional system `depos` on `PATH` if you opt into it
 
-Primary distribution is GitHub release binaries. `cargo install depos-cli` is a convenience path.
+Primary distribution is GitHub release binaries. `cargo install depos --version 0.3.0` is the convenience path and the same version `.depos.cmake` bootstraps locally by default.
 
 ## Root
 
@@ -53,14 +53,62 @@ depos sync --depos-root "$PWD/.deps/depos" --manifest /path/to/deps.cmake
 CMake consumer:
 
 ```cmake
-include("/path/to/depos/cmake/DepoConsumer.cmake")
-# Set DEPOS_ROOT if you are using a non-default root.
-# set(DEPOS_ROOT "${CMAKE_SOURCE_DIR}/.deps/depos")
-depos_use(MANIFEST "${CMAKE_SOURCE_DIR}/deps.cmake")
-target_link_libraries(app PRIVATE zlib::zlib)
+include("/path/to/.depos.cmake")
+depos_depend_all()
+depos_link_all(app)
 ```
 
-Manifest example:
+```cmake
+include("/path/to/.depos.cmake")
+depos_depend(bitsery)
+depos_depend(itoa)
+depos_depend(zlib VERSION 1.3.2)
+depos_link(app bitsery itoa zlib)
+```
+
+`depos_depend_all()` scans the public top-level `depofiles/` directory next to `.depos.cmake` by default. `depos_link_all(<target>)` links every known primary target from those `DepoFile`s. `depos_link(<target> ...)` links specific package names or imported target names. Both link helpers default to `PUBLIC`; pass `PRIVATE` immediately after the target name if you want to stop propagation.
+
+`depos_depend(...)` can take a single `DepoFile` path, and `depos_depend_all(...)` can take a depofiles directory path only:
+
+```cmake
+depos_depend("${CMAKE_CURRENT_SOURCE_DIR}/depofiles/zlib.DepoFile")
+depos_depend_all("${CMAKE_CURRENT_SOURCE_DIR}/third_party/depofiles")
+```
+
+If you want non-propagating linkage on one target, make it explicit:
+
+```cmake
+depos_link(app PRIVATE zlib)
+```
+
+Libraries that ship with `depos` support two clean consumer modes:
+
+- source-tree consumption: ship top-level `.depos.cmake` plus public top-level `depofiles/`, and anyone building the library's own CMake can let that helper bootstrap and resolve everything without touching `depos` directly
+- published-depofile consumption: a downstream project can depend on the library package by name or point at the library's published `DepoFile`, and the library's `DEPENDS` graph cascades through to the final binary
+
+```cmake
+depos_depend(cascade_lib VERSION 1.0.0)
+depos_link(app cascade_lib)
+```
+
+```cmake
+depos_depend("${CMAKE_CURRENT_SOURCE_DIR}/third_party/cascade_lib.DepoFile")
+depos_link(app cascade_lib)
+```
+
+During configure, `.depos.cmake` emits `depos:` status lines while it bootstraps the tool, registers local `DepoFile`s, and syncs the registry so dependency work does not look stalled.
+
+By default `.depos.cmake` bootstraps `depos 0.3.0` into a hidden top-level `.depos/` directory next to the helper, keeps the local registry under that same hidden root, and records the selected mode in `.depos/.state.cmake`. Library maintainers should put `.depos.cmake` at the top of the repo before publishing the library and keep dependency `DepoFile`s in the public top-level `depofiles/` directory beside it so consumer builds can self-bootstrap from that location and just work.
+
+If you want a shared system install instead, install the tool yourself and point CMake at it explicitly:
+
+```bash
+cargo install depos --version 0.3.0
+```
+
+Then set `DEPOS_EXECUTABLE` and, if you want a shared registry/root, `DEPOS_ROOT`.
+
+Generated manifest example:
 
 ```cmake
 depos_require(zlib VERSION 1.3.2)

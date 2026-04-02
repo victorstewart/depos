@@ -1,0 +1,9 @@
+NAME gxhash
+VERSION 3.4.1
+SYSTEM_LIBS ALLOW
+# Best-effort source-only replacement. The old schema carried a local runtime-dispatch patch.
+SOURCE URL https://github.com/ogxd/gxhash/archive/refs/tags/3.4.1.tar.gz
+BUILD_SYSTEM CARGO
+CARGO_BUILD env "RUSTFLAGS=-C target-cpu=x86-64 -C target-feature=+aes,+sse2" cargo build --release --target-dir "${DEPO_BUILD_DIR}/cargo-target" --manifest-path ffi/Cargo.toml
+STAGE_FILE BUILD cargo-target/release/libgxhash.a lib/libgxhash.a
+TARGET gxhash::gxhash STATIC lib/libgxhash.a

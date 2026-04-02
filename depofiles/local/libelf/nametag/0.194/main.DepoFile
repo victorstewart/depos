@@ -1,0 +1,36 @@
+NAME libelf
+VERSION 0.194
+SYSTEM_LIBS ALLOW
+DEPENDS zlib VERSION 1.3.2
+SOURCE URL https://sourceware.org/elfutils/ftp/0.194/elfutils-0.194.tar.bz2
+BUILD_SYSTEM AUTOCONF
+AUTOCONF_CONFIGURE env PKG_CONFIG_DIR= PKG_CONFIG_LIBDIR=${dep:zlib}/lib/pkgconfig CPPFLAGS=-I${dep:zlib}/include LDFLAGS=-L${dep:zlib}/lib LIBS=-lz ./configure --prefix="${DEPO_PREFIX}" --libdir="${DEPO_PREFIX}/lib" --disable-debuginfod --disable-libdebuginfod --disable-nls --enable-install-elfh --without-bzlib --without-lzma --without-zstd
+AUTOCONF_BUILD_SH <<'EOF'
+make -C lib -j$(nproc) eu-search.o
+make -C libelf -j$(nproc) libelf.a
+ar rcs "${DEPO_SOURCE_DIR}/libelf/libelf.a" "${DEPO_SOURCE_DIR}/lib/eu-search.o"
+ranlib "${DEPO_SOURCE_DIR}/libelf/libelf.a"
+EOF
+AUTOCONF_INSTALL_SH <<'EOF'
+install -d "${DEPO_PREFIX}/include/elfutils" "${DEPO_PREFIX}/lib"
+
+install -m 644 \
+  "${DEPO_SOURCE_DIR}/libelf/libelf.a" \
+  "${DEPO_PREFIX}/lib/libelf.a"
+install -m 644 \
+  "${DEPO_SOURCE_DIR}/libelf/libelf.h" \
+  "${DEPO_PREFIX}/include/libelf.h"
+install -m 644 \
+  "${DEPO_SOURCE_DIR}/libelf/gelf.h" \
+  "${DEPO_PREFIX}/include/gelf.h"
+install -m 644 \
+  "${DEPO_SOURCE_DIR}/libelf/nlist.h" \
+  "${DEPO_PREFIX}/include/nlist.h"
+install -m 644 \
+  "${DEPO_SOURCE_DIR}/libelf/elf.h" \
+  "${DEPO_PREFIX}/include/elf.h"
+install -m 644 \
+  "${DEPO_SOURCE_DIR}/libelf/elf-knowledge.h" \
+  "${DEPO_PREFIX}/include/elfutils/elf-knowledge.h"
+EOF
+TARGET libelf::libelf STATIC lib/libelf.a INTERFACE include

@@ -1,0 +1,18 @@
+NAME tidesdb
+VERSION 8.6.2
+SYSTEM_LIBS ALLOW
+# Best-effort source-only replacement. The old schema carried local compatibility rewrites.
+DEPENDS zstd VERSION 1.5.7
+DEPENDS snappy VERSION 1.2.2
+DEPENDS lz4 VERSION 1.10.0
+SOURCE URL https://github.com/tidesdb/tidesdb/archive/refs/tags/v8.6.2.tar.gz
+BUILD_SYSTEM CMAKE
+CMAKE_ARG "-DCMAKE_PREFIX_PATH=${dep:zstd};${dep:snappy};${dep:lz4}"
+CMAKE_ARG "-DCMAKE_C_FLAGS=-I${dep:zstd}/include -I${dep:snappy}/include -I${dep:lz4}/include"
+CMAKE_DEFINE BUILD_SHARED_LIBS=OFF
+CMAKE_DEFINE TIDESDB_BUILD_TESTS=OFF
+CMAKE_DEFINE TIDESDB_WITH_SANITIZER=OFF
+CMAKE_DEFINE TIDESDB_WITH_MIMALLOC=OFF
+CMAKE_DEFINE TIDESDB_WITH_TCMALLOC=OFF
+TARGET tidesdb::tidesdb STATIC lib/libtidesdb.a INTERFACE include
+LINK tidesdb::tidesdb zstd::zstd snappy::snappy lz4::lz4 pthread m stdc++ atomic

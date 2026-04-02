@@ -3,5 +3,5 @@ build/
 .tasks/
 target/
 .cargo/
+.depos/
 .depos-home/
-depofiles/

@@ -1,0 +1,27 @@
+NAME libbpf
+VERSION 1.5.0
+SYSTEM_LIBS ALLOW
+DEPENDS libelf VERSION 0.194
+DEPENDS zlib VERSION 1.3.2
+SOURCE URL https://github.com/libbpf/libbpf/archive/refs/tags/v1.5.0.tar.gz
+BUILD_SYSTEM AUTOCONF
+AUTOCONF_SKIP_CONFIGURE
+AUTOCONF_BUILD env BUILD_STATIC_ONLY=y NO_PKG_CONFIG=1 OBJDIR="${DEPO_BUILD_DIR}" "EXTRA_CFLAGS=-Wno-error=incompatible-pointer-types-discards-qualifiers -I${dep:libelf}/include -I${dep:zlib}/include" "EXTRA_LDFLAGS=-L${dep:libelf}/lib -L${dep:zlib}/lib" make -C src -j$(nproc)
+AUTOCONF_INSTALL_SH <<'EOF'
+install -d "${DEPO_PREFIX}/include/bpf" "${DEPO_PREFIX}/lib/pkgconfig"
+
+install -m 644 \
+  "${DEPO_BUILD_DIR}/libbpf.a" \
+  "${DEPO_PREFIX}/lib/libbpf.a"
+install -m 644 \
+  "${DEPO_SOURCE_DIR}/src/"*.h \
+  "${DEPO_PREFIX}/include/bpf/"
+sed \
+  -e 's|@PREFIX@|${DEPO_PREFIX}|' \
+  -e 's|@LIBDIR@|${DEPO_PREFIX}/lib|' \
+  -e 's|@VERSION@|1.5.0|' \
+  < "${DEPO_SOURCE_DIR}/src/libbpf.pc.template" \
+  > "${DEPO_PREFIX}/lib/pkgconfig/libbpf.pc"
+EOF
+TARGET libbpf::libbpf STATIC lib/libbpf.a INTERFACE include
+LINK libbpf::libbpf libelf::libelf zlib::zlib

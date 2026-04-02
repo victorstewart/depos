@@ -1,0 +1,4 @@
+NAME static_type_info
+VERSION master
+SOURCE GIT https://github.com/victorstewart/StaticTypeInfo.git master
+TARGET static_type_info::static_type_info INTERFACE include

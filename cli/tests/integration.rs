@@ -1,7 +1,7 @@
 // Copyright 2026 Victor Stewart
 // SPDX-License-Identifier: Apache-2.0
 
-use depos_cli::{
+use depos::{
     collect_statuses, default_variant, host_arch, parse_depofile, parse_manifest,
     register_depofile, registry_dir_from_manifest, sync_registry, unregister_depofile,
     GlobalSystemLibs, PackageState, RegisterOptions, RequestMode, RequestSource, StageKind,
@@ -3219,8 +3219,470 @@ fn sync_rejects_manifest_with_multiple_target_arches() {
     );
 }
 
+#[test]
+fn cmake_source_library_matrix_cascades_dependencies() {
+    let sandbox = Sandbox::new();
+    let base_repo = create_demo_static_library_repo(
+        &sandbox,
+        "upstreams/source_matrix_base_math",
+        "base_math",
+        "base_math",
+        40,
+    );
+    let adder_repo = create_demo_static_library_repo(
+        &sandbox,
+        "upstreams/source_matrix_adder",
+        "adder",
+        "adder",
+        2,
+    );
+
+    for source_style in ["all", "explicit"] {
+        for resolution_mode in ["explicit", "bootstrap"] {
+            let scenario = format!("source-{source_style}-{resolution_mode}");
+            let (library_repo, _) =
+                create_cascade_library_repo(&sandbox, &scenario, &base_repo, &adder_repo);
+            let build_dir = sandbox.depos_root().join("cmake-builds").join(&scenario);
+            let mut definitions =
+                vec![("CASCADE_SOURCE_STYLE".to_string(), source_style.to_string())];
+            let envs = cmake_resolution_env(
+                &sandbox,
+                &scenario,
+                resolution_mode,
+                &library_repo,
+                &mut definitions,
+            );
+
+            configure_build_and_test_cmake(&library_repo, &build_dir, &definitions, &envs);
+
+            assert!(
+                library_repo.join(".depos/.state.cmake").exists(),
+                "missing state for scenario {scenario}"
+            );
+            if resolution_mode == "bootstrap" {
+                assert!(
+                    library_repo.join(".depos/.tool/bin/depos").exists(),
+                    "missing bootstrapped binary for scenario {scenario}"
+                );
+                assert!(
+                    library_repo.join(".depos/.root").exists(),
+                    "missing hidden local root for scenario {scenario}"
+                );
+            } else {
+                assert!(
+                    !library_repo.join(".depos/.tool/bin/depos").exists(),
+                    "unexpected bootstrapped binary for explicit scenario {scenario}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cmake_depofile_consumer_matrix_cascades_transitive_dependencies() {
+    let sandbox = Sandbox::new();
+    let base_repo = create_demo_static_library_repo(
+        &sandbox,
+        "upstreams/consumer_matrix_base_math",
+        "base_math",
+        "base_math",
+        40,
+    );
+    let adder_repo = create_demo_static_library_repo(
+        &sandbox,
+        "upstreams/consumer_matrix_adder",
+        "adder",
+        "adder",
+        2,
+    );
+
+    for consumer_mode in ["package", "path"] {
+        for resolution_mode in ["explicit", "bootstrap"] {
+            let scenario = format!("consumer-{consumer_mode}-{resolution_mode}");
+            let (library_repo, published_depofile) =
+                create_cascade_library_repo(&sandbox, &scenario, &base_repo, &adder_repo);
+            let consumer_root = sandbox.depos_root().join("consumers").join(&scenario);
+            create_cascade_consumer_project(
+                &consumer_root,
+                &library_repo,
+                &published_depofile,
+                consumer_mode,
+            );
+
+            let build_dir = consumer_root.join("build");
+            let mut definitions = vec![
+                (
+                    "CASCADE_CONSUMER_MODE".to_string(),
+                    consumer_mode.to_string(),
+                ),
+                (
+                    "CASCADE_LIBRARY_DEPOFILE".to_string(),
+                    published_depofile.display().to_string(),
+                ),
+            ];
+            let envs = cmake_resolution_env(
+                &sandbox,
+                &scenario,
+                resolution_mode,
+                &consumer_root,
+                &mut definitions,
+            );
+
+            configure_build_and_test_cmake(&consumer_root, &build_dir, &definitions, &envs);
+
+            assert!(
+                consumer_root.join(".depos/.state.cmake").exists(),
+                "missing consumer state for scenario {scenario}"
+            );
+            if resolution_mode == "bootstrap" {
+                assert!(
+                    consumer_root.join(".depos/.tool/bin/depos").exists(),
+                    "missing bootstrapped binary for consumer scenario {scenario}"
+                );
+                assert!(
+                    consumer_root.join(".depos/.root").exists(),
+                    "missing hidden local root for consumer scenario {scenario}"
+                );
+            } else {
+                assert!(
+                    !consumer_root.join(".depos/.tool/bin/depos").exists(),
+                    "unexpected bootstrapped binary for explicit consumer scenario {scenario}"
+                );
+            }
+        }
+    }
+}
+
 fn depofile_demo() -> String {
     "NAME demo\nVERSION 1.0.0\nSYSTEM_LIBS INHERIT\nTARGET demo::demo INTERFACE include\nSOURCE URL https://example.com/demo.tar.gz\nSHA256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n".to_string()
+}
+
+fn create_demo_static_library_repo(
+    sandbox: &Sandbox,
+    relative: &str,
+    package_name: &str,
+    function_stem: &str,
+    value: i32,
+) -> PathBuf {
+    sandbox.create_git_repo_owned(
+        relative,
+        &[
+            (
+                "CMakeLists.txt".to_string(),
+                format!(
+                    "cmake_minimum_required(VERSION 3.21)\nproject({package_name} LANGUAGES CXX)\nadd_library({package_name} STATIC src/{package_name}.cpp)\ntarget_compile_features({package_name} PUBLIC cxx_std_20)\ntarget_include_directories({package_name} PUBLIC ${{CMAKE_CURRENT_SOURCE_DIR}}/include)\ninstall(TARGETS {package_name} ARCHIVE DESTINATION lib)\ninstall(DIRECTORY include/ DESTINATION include)\n"
+                ),
+            ),
+            (
+                format!("src/{package_name}.cpp"),
+                format!(
+                    "#include <{package_name}/{package_name}.h>\n\nint {function_stem}_value() {{\n    return {value};\n}}\n"
+                ),
+            ),
+            (
+                format!("include/{package_name}/{package_name}.h"),
+                format!("#pragma once\n\nint {function_stem}_value();\n"),
+            ),
+        ],
+    )
+}
+
+fn create_cascade_library_repo(
+    sandbox: &Sandbox,
+    relative: &str,
+    base_repo: &Path,
+    adder_repo: &Path,
+) -> (PathBuf, PathBuf) {
+    let library_repo = sandbox.depos_root().join("libraries").join(relative);
+    let repo = sandbox.create_git_repo_owned(
+        &format!("libraries/{relative}"),
+        &[
+            (
+                ".depos.cmake".to_string(),
+                fs::read_to_string("/root/depos/.depos.cmake").expect("read repo helper"),
+            ),
+            (
+                "CMakeLists.txt".to_string(),
+                "cmake_minimum_required(VERSION 3.21)\nproject(cascade_lib LANGUAGES CXX)\n\nset(_cascade_base_root \"\")\nset(_cascade_adder_root \"\")\nif (DEFINED ENV{CMAKE_PREFIX_PATH} AND NOT \"$ENV{CMAKE_PREFIX_PATH}\" STREQUAL \"\")\n  set(_cascade_prefix_roots \"$ENV{CMAKE_PREFIX_PATH}\")\n  foreach(_cascade_root IN LISTS _cascade_prefix_roots)\n    if (_cascade_base_root STREQUAL \"\" AND EXISTS \"${_cascade_root}/include/base_math/base_math.h\")\n      set(_cascade_base_root \"${_cascade_root}\")\n    endif()\n    if (_cascade_adder_root STREQUAL \"\" AND EXISTS \"${_cascade_root}/include/adder/adder.h\")\n      set(_cascade_adder_root \"${_cascade_root}\")\n    endif()\n  endforeach()\nendif()\n\nif (NOT _cascade_base_root STREQUAL \"\" AND NOT _cascade_adder_root STREQUAL \"\")\n  add_library(base_math::base_math STATIC IMPORTED GLOBAL)\n  set_target_properties(base_math::base_math PROPERTIES\n    IMPORTED_LOCATION \"${_cascade_base_root}/lib/libbase_math.a\"\n    INTERFACE_INCLUDE_DIRECTORIES \"${_cascade_base_root}/include\"\n  )\n  add_library(adder::adder STATIC IMPORTED GLOBAL)\n  set_target_properties(adder::adder PROPERTIES\n    IMPORTED_LOCATION \"${_cascade_adder_root}/lib/libadder.a\"\n    INTERFACE_INCLUDE_DIRECTORIES \"${_cascade_adder_root}/include\"\n  )\nelse()\n  include(\"${CMAKE_CURRENT_LIST_DIR}/.depos.cmake\")\n  set(CASCADE_SOURCE_STYLE \"all\" CACHE STRING \"all or explicit\")\n  if (CASCADE_SOURCE_STYLE STREQUAL \"all\")\n    depos_depend_all()\n    set(_cascade_link_mode ALL)\n  elseif (CASCADE_SOURCE_STYLE STREQUAL \"explicit\")\n    depos_depend(base_math VERSION 1.0.0)\n    depos_depend(adder VERSION 1.0.0)\n    set(_cascade_link_mode EXPLICIT)\n  else()\n    message(FATAL_ERROR \"Unsupported CASCADE_SOURCE_STYLE=${CASCADE_SOURCE_STYLE}\")\n  endif()\nendif()\n\nadd_library(cascade_lib STATIC src/cascade_lib.cpp)\ntarget_compile_features(cascade_lib PUBLIC cxx_std_20)\ntarget_include_directories(cascade_lib PUBLIC \"${CMAKE_CURRENT_SOURCE_DIR}/include\")\nif (DEFINED _cascade_link_mode)\n  if (_cascade_link_mode STREQUAL \"ALL\")\n    depos_link_all(cascade_lib)\n  else()\n    depos_link(cascade_lib base_math adder)\n  endif()\nelse()\n  target_link_libraries(cascade_lib PUBLIC base_math::base_math adder::adder)\nendif()\ninstall(TARGETS cascade_lib ARCHIVE DESTINATION lib)\ninstall(DIRECTORY include/ DESTINATION include)\n\nif (PROJECT_IS_TOP_LEVEL)\n  add_executable(cascade_lib_smoke app/main.cpp)\n  target_compile_features(cascade_lib_smoke PRIVATE cxx_std_20)\n  target_link_libraries(cascade_lib_smoke PRIVATE cascade_lib)\n  enable_testing()\n  add_test(NAME cascade-lib-smoke COMMAND cascade_lib_smoke)\nendif()\n"
+                    .to_string(),
+            ),
+            (
+                "src/cascade_lib.cpp".to_string(),
+                "#include <adder/adder.h>\n#include <base_math/base_math.h>\n#include <cascade_lib/cascade_lib.h>\n\nint cascade_lib_value() {\n    return base_math_value() + adder_value();\n}\n"
+                    .to_string(),
+            ),
+            (
+                "include/cascade_lib/cascade_lib.h".to_string(),
+                "#pragma once\n\nint cascade_lib_value();\n".to_string(),
+            ),
+            (
+                "app/main.cpp".to_string(),
+                "#include <cascade_lib/cascade_lib.h>\n\nint main() {\n    return cascade_lib_value() == 42 ? 0 : 1;\n}\n"
+                    .to_string(),
+            ),
+            (
+                "depofiles/base_math/release/1.0.0/main.DepoFile".to_string(),
+                format!(
+                    "NAME base_math\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE GIT {} HEAD\nBUILD_SYSTEM CMAKE\nTARGET base_math::base_math STATIC lib/libbase_math.a INTERFACE include\n",
+                    base_repo.display()
+                ),
+            ),
+            (
+                "depofiles/adder/release/1.0.0/main.DepoFile".to_string(),
+                format!(
+                    "NAME adder\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE GIT {} HEAD\nBUILD_SYSTEM CMAKE\nTARGET adder::adder STATIC lib/libadder.a INTERFACE include\n",
+                    adder_repo.display()
+                ),
+            ),
+            (
+                "published/cascade_lib.DepoFile".to_string(),
+                format!(
+                    "NAME cascade_lib\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE GIT {} HEAD\nBUILD_SYSTEM CMAKE\nDEPENDS base_math VERSION 1.0.0\nDEPENDS adder VERSION 1.0.0\nTARGET cascade_lib::cascade_lib STATIC lib/libcascade_lib.a INTERFACE include\n",
+                    library_repo.display()
+                ),
+            ),
+        ],
+    );
+    let published_depofile = repo.join("published/cascade_lib.DepoFile");
+    (repo, published_depofile)
+}
+
+fn create_cascade_consumer_project(
+    consumer_root: &Path,
+    library_repo: &Path,
+    published_depofile: &Path,
+    consumer_mode: &str,
+) {
+    fs::create_dir_all(consumer_root).expect("create consumer root");
+    fs::copy(
+        "/root/depos/.depos.cmake",
+        consumer_root.join(".depos.cmake"),
+    )
+    .expect("copy helper into consumer root");
+    fs::write(
+        consumer_root.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.21)\nproject(cascade_consumer LANGUAGES CXX)\ninclude(\"${CMAKE_CURRENT_LIST_DIR}/.depos.cmake\")\nset(CASCADE_CONSUMER_MODE \"package\" CACHE STRING \"package or path\")\nset(CASCADE_LIBRARY_DEPOFILE \"\" CACHE FILEPATH \"Published cascade library DepoFile\")\nif (CASCADE_CONSUMER_MODE STREQUAL \"package\")\n  depos_depend(cascade_lib VERSION 1.0.0)\nelseif (CASCADE_CONSUMER_MODE STREQUAL \"path\")\n  depos_depend(\"${CASCADE_LIBRARY_DEPOFILE}\")\nelse()\n  message(FATAL_ERROR \"Unsupported CASCADE_CONSUMER_MODE=${CASCADE_CONSUMER_MODE}\")\nendif()\nadd_executable(cascade_consumer main.cpp)\ntarget_compile_features(cascade_consumer PRIVATE cxx_std_20)\ndepos_link(cascade_consumer cascade_lib)\nenable_testing()\nadd_test(NAME cascade-consumer COMMAND cascade_consumer)\n",
+    )
+    .expect("write consumer CMakeLists");
+    fs::write(
+        consumer_root.join("main.cpp"),
+        "#include <cascade_lib/cascade_lib.h>\n\nint main() {\n    return cascade_lib_value() == 42 ? 0 : 1;\n}\n",
+    )
+    .expect("write consumer main");
+
+    if consumer_mode == "package" {
+        copy_tree(
+            &library_repo.join("depofiles"),
+            &consumer_root.join("depofiles"),
+        );
+        let consumer_library_depofile =
+            consumer_root.join("depofiles/cascade_lib/release/1.0.0/main.DepoFile");
+        if let Some(parent) = consumer_library_depofile.parent() {
+            fs::create_dir_all(parent).expect("create consumer library depofile parent");
+        }
+        fs::copy(published_depofile, consumer_library_depofile)
+            .expect("copy published depofile into consumer depofiles");
+    }
+}
+
+#[test]
+fn cmake_depend_functions_emit_status_updates() {
+    let sandbox = Sandbox::new();
+    let smoke_source = Path::new("/root/depos/tests/smoke");
+    let depos_binary = PathBuf::from(env!("CARGO_BIN_EXE_depos"));
+
+    let explicit_build = sandbox.depos_root().join("cmake-status").join("explicit");
+    let explicit_output = configure_cmake_capture_output(
+        smoke_source,
+        &explicit_build,
+        &[
+            (
+                "DEPOS_EXECUTABLE".to_string(),
+                depos_binary.display().to_string(),
+            ),
+            (
+                "DEPOS_ROOT".to_string(),
+                explicit_build.join("depos-root").display().to_string(),
+            ),
+            ("DEPOS_SMOKE_STYLE".to_string(), "explicit".to_string()),
+        ],
+        &[],
+    );
+    assert!(explicit_output.contains("depos: requesting bitsery VERSION 5.2.3"));
+    assert!(explicit_output.contains("depos: requesting zlib VERSION 1.3.2"));
+    assert!(explicit_output.contains("depos: using system depos at"));
+    assert!(explicit_output.contains("depos: syncing 3 dependency request(s) with system depos"));
+    assert!(explicit_output.contains("depos: loaded registry targets from"));
+
+    let all_build = sandbox.depos_root().join("cmake-status").join("all");
+    let all_output = configure_cmake_capture_output(
+        smoke_source,
+        &all_build,
+        &[
+            (
+                "DEPOS_EXECUTABLE".to_string(),
+                depos_binary.display().to_string(),
+            ),
+            (
+                "DEPOS_ROOT".to_string(),
+                all_build.join("depos-root").display().to_string(),
+            ),
+            ("DEPOS_SMOKE_STYLE".to_string(), "all".to_string()),
+        ],
+        &[],
+    );
+    assert!(all_output.contains("depos: requesting all 3 DepoFile(s) under"));
+    assert!(
+        all_output.contains("depos: registering 3 local DepoFile(s) under namespace depos_smoke")
+    );
+    assert!(all_output.contains("depos: syncing 3 dependency request(s) with system depos"));
+    assert!(all_output.contains("depos: loaded registry targets from"));
+}
+
+fn cmake_resolution_env(
+    sandbox: &Sandbox,
+    scenario: &str,
+    resolution_mode: &str,
+    project_root: &Path,
+    definitions: &mut Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    match resolution_mode {
+        "explicit" => {
+            definitions.push((
+                "DEPOS_EXECUTABLE".to_string(),
+                env!("CARGO_BIN_EXE_depos").to_string(),
+            ));
+            definitions.push((
+                "DEPOS_ROOT".to_string(),
+                project_root
+                    .join(".explicit-depos-root")
+                    .display()
+                    .to_string(),
+            ));
+            Vec::new()
+        }
+        "bootstrap" => {
+            definitions.push((
+                "DEPOS_ALLOW_SYSTEM_EXECUTABLE".to_string(),
+                "OFF".to_string(),
+            ));
+            let fake_cargo_dir = create_fake_cargo_dir(sandbox, &format!("fake-cargo/{scenario}"));
+            vec![(
+                "PATH".to_string(),
+                format!(
+                    "{}:{}",
+                    fake_cargo_dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )]
+        }
+        other => panic!("unsupported resolution mode {other}"),
+    }
+}
+
+fn configure_build_and_test_cmake(
+    source_dir: &Path,
+    build_dir: &Path,
+    definitions: &[(String, String)],
+    envs: &[(String, String)],
+) {
+    configure_cmake_capture_output(source_dir, build_dir, definitions, envs);
+
+    run_command_env_vec(
+        source_dir,
+        &[
+            "cmake".to_string(),
+            "--build".to_string(),
+            build_dir.display().to_string(),
+            "--parallel".to_string(),
+            nproc_string(),
+        ],
+        envs,
+    );
+    run_command_env_vec(
+        source_dir,
+        &[
+            "ctest".to_string(),
+            "--test-dir".to_string(),
+            build_dir.display().to_string(),
+            "--output-on-failure".to_string(),
+        ],
+        envs,
+    );
+}
+
+fn configure_cmake_capture_output(
+    source_dir: &Path,
+    build_dir: &Path,
+    definitions: &[(String, String)],
+    envs: &[(String, String)],
+) -> String {
+    let mut configure = vec![
+        "cmake".to_string(),
+        "--fresh".to_string(),
+        "-S".to_string(),
+        source_dir.display().to_string(),
+        "-B".to_string(),
+        build_dir.display().to_string(),
+    ];
+    for (key, value) in definitions {
+        configure.push(format!("-D{key}={value}"));
+    }
+    run_command_capture_env_vec(source_dir, &configure, envs)
+}
+
+fn create_fake_cargo_dir(sandbox: &Sandbox, relative: &str) -> PathBuf {
+    let dir = sandbox.depos_root().join(relative);
+    fs::create_dir_all(&dir).expect("create fake cargo dir");
+    let cargo = dir.join("cargo");
+    fs::write(
+        &cargo,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\n\nif [[ \"${{1:-}}\" != \"install\" ]]; then\n  echo \"unexpected cargo invocation: $*\" >&2\n  exit 1\nfi\n\nroot=\"\"\nversion=\"\"\ncrate=\"\"\nwhile (($#)); do\n  case \"$1\" in\n    install|--locked)\n      shift\n      ;;\n    --root)\n      root=\"$2\"\n      shift 2\n      ;;\n    --version)\n      version=\"$2\"\n      shift 2\n      ;;\n    -j)\n      shift 2\n      ;;\n    depos)\n      crate=\"$1\"\n      shift\n      ;;\n    *)\n      echo \"unexpected cargo argument: $1\" >&2\n      exit 1\n      ;;\n  esac\ndone\n\ntest -n \"$root\"\ntest \"$version\" = \"0.3.0\"\ntest \"$crate\" = \"depos\"\nmkdir -p \"$root/bin\"\ncp '{}' \"$root/bin/depos\"\n",
+            env!("CARGO_BIN_EXE_depos")
+        ),
+    )
+    .expect("write fake cargo");
+    let mut perms = fs::metadata(&cargo).expect("stat fake cargo").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&cargo, perms).expect("chmod fake cargo");
+    dir
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create copy_tree destination");
+    let entries = fs::read_dir(source)
+        .unwrap_or_else(|error| panic!("read_dir {} failed: {error}", source.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("read_dir entry failed: {error}"));
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent).expect("create copy_tree parent");
+            }
+            fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+                panic!(
+                    "copy {} -> {} failed: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+    }
+}
+
+fn nproc_string() -> String {
+    let output = Command::new(resolve_tool("nproc"))
+        .output()
+        .expect("spawn nproc");
+    assert!(output.status.success(), "nproc failed");
+    String::from_utf8(output.stdout)
+        .expect("utf-8 nproc output")
+        .trim()
+        .to_string()
 }
 
 fn scratch_toolchain_lines() -> String {
@@ -3385,6 +3847,27 @@ impl Sandbox {
         repo
     }
 
+    fn create_git_repo_owned(&self, relative: &str, files: &[(String, String)]) -> PathBuf {
+        let repo = self.root.path().join(relative);
+        fs::create_dir_all(&repo).expect("create owned repo");
+        for (path, contents) in files {
+            let file_path = repo.join(path);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent).expect("create owned repo parent");
+            }
+            fs::write(file_path, contents).expect("write owned repo file");
+        }
+        run_command(&repo, ["git", "init", "--quiet"]);
+        run_command(
+            &repo,
+            ["git", "config", "user.email", "codex@example.invalid"],
+        );
+        run_command(&repo, ["git", "config", "user.name", "Codex"]);
+        run_command(&repo, ["git", "add", "."]);
+        run_command(&repo, ["git", "commit", "--quiet", "-m", "init"]);
+        repo
+    }
+
     fn create_tar_archive(&self, relative: &str, files: &[(&str, &str)]) -> PathBuf {
         let root = self.root.path().join(relative);
         let source = root.join("payload");
@@ -3529,6 +4012,45 @@ fn run_command_vec(current_dir: &Path, argv: &[String]) {
         .status()
         .expect("spawn command");
     assert!(status.success(), "command failed: {:?}", argv);
+}
+
+fn run_command_env_vec(current_dir: &Path, argv: &[String], envs: &[(String, String)]) {
+    let mut command = Command::new(resolve_tool(argv.first().expect("command name")));
+    command.args(&argv[1..]).current_dir(current_dir);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let status = command.status().expect("spawn command");
+    assert!(
+        status.success(),
+        "command failed: {:?} env={:?}",
+        argv,
+        envs
+    );
+}
+
+fn run_command_capture_env_vec(
+    current_dir: &Path,
+    argv: &[String],
+    envs: &[(String, String)],
+) -> String {
+    let mut command = Command::new(resolve_tool(argv.first().expect("command name")));
+    command.args(&argv[1..]).current_dir(current_dir);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command.output().expect("spawn command");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "command failed: {:?} env={:?}\nstdout:\n{}\nstderr:\n{}",
+        argv,
+        envs,
+        stdout,
+        stderr
+    );
+    format!("{stdout}{stderr}")
 }
 
 fn run_command_capture<const N: usize>(current_dir: &Path, argv: [&str; N]) -> String {

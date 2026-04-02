@@ -1,0 +1,4 @@
+NAME itoa
+VERSION main
+SOURCE GIT https://github.com/jeaiii/itoa.git main
+TARGET itoa::itoa INTERFACE include

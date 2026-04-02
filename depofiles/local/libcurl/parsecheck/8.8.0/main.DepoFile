@@ -1,0 +1,10 @@
+NAME libcurl
+VERSION 8.8.0
+SYSTEM_LIBS ALLOW
+DEPENDS nghttp2 VERSION 1.64.0
+DEPENDS openssl VERSION 3.4.1
+DEPENDS zlib VERSION 1.3.2
+SOURCE URL https://github.com/curl/curl/releases/download/curl-8_8_0/curl-8.8.0.tar.gz
+BUILD_SYSTEM AUTOCONF
+AUTOCONF_CONFIGURE env "CPPFLAGS=-I${dep:openssl}/include -I${dep:nghttp2}/include -I${dep:zlib}/include" "LDFLAGS=-L${dep:openssl}/lib -L${dep:nghttp2}/lib -L${dep:zlib}/lib" PKG_CONFIG_DIR= "PKG_CONFIG_LIBDIR=${dep:openssl}/lib/pkgconfig:${dep:nghttp2}/lib/pkgconfig:${dep:zlib}/lib/pkgconfig" ./configure --prefix="${DEPO_PREFIX}" --libdir="${DEPO_PREFIX}/lib" --with-openssl="${dep:openssl}" --with-nghttp2="${dep:nghttp2}" --with-zlib="${dep:zlib}" --without-zstd --without-brotli --without-libpsl --without-libidn2 --disable-ldap --disable-ldaps --enable-static --disable-shared
+TARGET libcurl::libcurl STATIC lib/libcurl.a INTERFACE include

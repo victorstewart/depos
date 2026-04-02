@@ -1,0 +1,56 @@
+NAME hse
+VERSION master
+SYSTEM_LIBS ALLOW
+# The old Nametag schema patched HSE to use direct dependency() resolution for libevent.
+# Keep this testing DepoFile aligned with that intent instead of forcing the broken fallback.
+SOURCE GIT https://github.com/victorstewart/hse.git master
+BUILD_SYSTEM MESON
+MESON_SETUP_SH <<'EOF'
+WORKDIR="${DEPO_BUILD_DIR}/hse-src"
+
+rm -rf "$WORKDIR"
+mkdir -p "$WORKDIR"
+cp -a "${DEPO_SOURCE_DIR}/." "$WORKDIR/"
+cd "$WORKDIR"
+
+env \
+  PKG_CONFIG_DIR= \
+  PKG_CONFIG_PATH= \
+  PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig \
+  CPPFLAGS="-I${DEPO_BUILD_DIR}/hse-src/subprojects/libbsd-0.9.0/include" \
+  CFLAGS="-I${DEPO_BUILD_DIR}/hse-src/subprojects/libbsd-0.9.0/include" \
+  meson setup build \
+  --wipe \
+  --buildtype=release \
+  -Dcli=false \
+  -Dexperimental=true \
+  -Dtests=false \
+  -Dtools=disabled \
+  -Dsamples=false \
+  -Dbindings=none \
+  -Ddocs=disabled \
+  -Domf-byte-order=little \
+  -Dpmem=disabled \
+  --prefix="${DEPO_PREFIX}" \
+  --libdir=lib
+EOF
+MESON_COMPILE_SH <<'EOF'
+cd "${DEPO_BUILD_DIR}/hse-src"
+
+env \
+  PKG_CONFIG_DIR= \
+  PKG_CONFIG_PATH= \
+  PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig \
+  meson compile -C build
+EOF
+MESON_INSTALL_SH <<'EOF'
+cd "${DEPO_BUILD_DIR}/hse-src"
+
+env \
+  PKG_CONFIG_DIR= \
+  PKG_CONFIG_PATH= \
+  PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig \
+  meson install -C build
+rm -rf "${DEPO_PREFIX}/include/cjson"
+EOF
+TARGET hse::hse SHARED lib/libhse-3.so INTERFACE include

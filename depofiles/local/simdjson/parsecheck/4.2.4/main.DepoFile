@@ -1,0 +1,10 @@
+NAME simdjson
+VERSION 4.2.4
+SYSTEM_LIBS ALLOW
+# Best-effort source-only replacement. The old schema carried an aarch64 cross-build patch.
+SOURCE URL https://github.com/simdjson/simdjson/archive/refs/tags/v4.2.4.tar.gz
+BUILD_SYSTEM CMAKE
+CMAKE_DEFINE CMAKE_INSTALL_INCLUDEDIR=include/simdjson
+CMAKE_DEFINE SIMDJSON_ENABLE_THREADS=OFF
+CMAKE_DEFINE SIMDJSON_DISABLE_DEPRECATED_API=ON
+TARGET simdjson::simdjson STATIC lib/libsimdjson.a INTERFACE include/simdjson

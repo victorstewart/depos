@@ -1,0 +1,8 @@
+NAME flatbuffers
+VERSION 22.9.29
+SYSTEM_LIBS ALLOW
+SOURCE URL https://github.com/google/flatbuffers/archive/refs/tags/v22.9.29.tar.gz
+BUILD_SYSTEM CMAKE
+CMAKE_DEFINE FLATBUFFERS_BUILD_TESTS=OFF
+CMAKE_DEFINE FLATBUFFERS_BUILD_FLATC=OFF
+TARGET flatbuffers::flatbuffers STATIC lib/libflatbuffers.a INTERFACE include

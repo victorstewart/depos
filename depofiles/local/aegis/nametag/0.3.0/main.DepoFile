@@ -1,0 +1,9 @@
+NAME aegis
+VERSION 0.3.0
+SYSTEM_LIBS ALLOW
+# Best-effort source-only replacement. The old schema carried a local VAES patch.
+SOURCE URL https://github.com/aegis-aead/libaegis/archive/refs/tags/0.3.0.tar.gz
+BUILD_SYSTEM CMAKE
+CMAKE_DEFINE CMAKE_INSTALL_INCLUDEDIR=include/aegis
+CMAKE_ARG "-DCMAKE_C_FLAGS=-mavx512f -mvaes"
+TARGET aegis::aegis STATIC lib/libaegis.a INTERFACE include

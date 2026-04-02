@@ -1,0 +1,7 @@
+NAME cppsort
+VERSION 1.16.0
+SOURCE URL https://github.com/Morwenn/cpp-sort/archive/refs/tags/1.16.0.tar.gz
+BUILD_SYSTEM CMAKE
+CMAKE_DEFINE CMAKE_INSTALL_INCLUDEDIR=include
+CMAKE_DEFINE BUILD_TESTING=OFF
+TARGET cppsort::cppsort INTERFACE include

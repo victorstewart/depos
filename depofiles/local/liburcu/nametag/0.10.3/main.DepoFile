@@ -1,0 +1,16 @@
+NAME liburcu
+VERSION 0.10.3
+SYSTEM_LIBS ALLOW
+SOURCE URL https://github.com/urcu/userspace-rcu/archive/v0.10.3.tar.gz
+BUILD_SYSTEM AUTOCONF
+AUTOCONF_CONFIGURE_SH <<'EOF'
+./bootstrap
+./configure \
+  --prefix="${DEPO_PREFIX}" \
+  --libdir="${DEPO_PREFIX}/lib" \
+  --enable-shared \
+  --disable-static
+EOF
+TARGET liburcu::liburcu_common SHARED lib/liburcu-common.so INTERFACE include
+TARGET liburcu::liburcu_bp SHARED lib/liburcu-bp.so INTERFACE include
+LINK liburcu::liburcu_bp liburcu::liburcu_common

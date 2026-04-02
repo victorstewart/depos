@@ -1,0 +1,34 @@
+NAME zonedetect
+VERSION master
+SYSTEM_LIBS ALLOW
+# Best-effort source-only replacement. The old schema downloaded db.zip separately for timezone21.bin.
+SOURCE GIT https://github.com/BertoldVdb/ZoneDetect.git master
+BUILD_SYSTEM MANUAL
+STAGE_FILE SOURCE library/zonedetect.h include/zonedetect/zonedetect.h
+STAGE_FILE BUILD libzonedetect.a lib/libzonedetect.a
+MANUAL_BUILD_SH <<'EOF'
+"$CC" -std=gnu99 -fPIC \
+  -c "${DEPO_SOURCE_DIR}/library/zonedetect.c" \
+  -o "${DEPO_BUILD_DIR}/zonedetect.o"
+"$AR" rcs "${DEPO_BUILD_DIR}/libzonedetect.a" "${DEPO_BUILD_DIR}/zonedetect.o"
+EOF
+MANUAL_INSTALL_SH <<'EOF'
+tmpdir="${DEPO_BUILD_DIR}/zonedetect-db"
+
+rm -rf "$tmpdir"
+mkdir -p \
+  "$tmpdir" \
+  "${DEPO_PREFIX}/lib"
+
+curl -fL --retry 3 --retry-delay 1 \
+  https://cdn.bertold.org/zonedetect/db/db.zip \
+  -o "$tmpdir/db.zip"
+
+unzip -oj "$tmpdir/db.zip" 'out/timezone21.bin' -d "$tmpdir"
+
+install -m 644 \
+  "$tmpdir/timezone21.bin" \
+  "${DEPO_PREFIX}/lib/timezone21.bin"
+EOF
+TARGET zonedetect::zonedetect STATIC lib/libzonedetect.a INTERFACE include/zonedetect
+ARTIFACT lib/timezone21.bin

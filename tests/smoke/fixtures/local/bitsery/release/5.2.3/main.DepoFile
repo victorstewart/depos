@@ -1,0 +1,7 @@
+NAME bitsery
+VERSION 5.2.3
+SOURCE URL https://github.com/fraillt/bitsery/archive/refs/tags/v5.2.3.tar.gz
+BUILD_SYSTEM CMAKE
+CMAKE_DEFINE CMAKE_INSTALL_INCLUDEDIR=include
+CMAKE_DEFINE CMAKE_POLICY_VERSION_MINIMUM=3.5
+TARGET bitsery::bitsery INTERFACE include

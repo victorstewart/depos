@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use depos_cli::{
+use depos::{
     collect_statuses, register_depofile, registry_dir_from_manifest, sync_registry,
     unregister_depofile, GlobalSystemLibs, RegisterOptions, StatusOptions, SyncOptions,
     UnregisterOptions,

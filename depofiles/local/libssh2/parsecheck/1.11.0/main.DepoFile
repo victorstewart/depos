@@ -1,0 +1,8 @@
+NAME libssh2
+VERSION 1.11.0
+SYSTEM_LIBS ALLOW
+DEPENDS openssl VERSION 3.4.1
+SOURCE URL https://github.com/libssh2/libssh2/releases/download/libssh2-1.11.0/libssh2-1.11.0.tar.gz
+BUILD_SYSTEM AUTOCONF
+AUTOCONF_CONFIGURE env CPPFLAGS=-I${dep:openssl}/include LDFLAGS=-L${dep:openssl}/lib PKG_CONFIG_DIR= PKG_CONFIG_LIBDIR=${dep:openssl}/lib/pkgconfig ./configure --prefix="${DEPO_PREFIX}" --libdir="${DEPO_PREFIX}/lib" --includedir="${DEPO_PREFIX}/include/libssh2" --disable-shared --with-libssl-prefix="${dep:openssl}" --disable-tests --disable-examples-build --disable-docker-tests --disable-sshd-tests
+TARGET libssh2::libssh2 STATIC lib/libssh2.a INTERFACE include

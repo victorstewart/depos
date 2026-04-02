@@ -1,0 +1,22 @@
+NAME picoquic
+VERSION master
+SYSTEM_LIBS ALLOW
+DEPENDS openssl VERSION 3.4.1
+DEPENDS picotls VERSION master
+SOURCE GIT https://github.com/private-octopus/picoquic.git master
+BUILD_SYSTEM CMAKE
+CMAKE_ARG "-DCMAKE_PREFIX_PATH=${dep:openssl};${dep:picotls}"
+CMAKE_DEFINE PTLS_INCLUDE_DIR=${dep:picotls}/include
+CMAKE_DEFINE PTLS_CORE_LIBRARY=${dep:picotls}/lib/libpicotls-core.a
+CMAKE_DEFINE PTLS_MINICRYPTO_LIBRARY=${dep:picotls}/lib/libpicotls-minicrypto.a
+CMAKE_DEFINE PTLS_OPENSSL_LIBRARY=${dep:picotls}/lib/libpicotls-openssl.a
+CMAKE_DEFINE picoquic_BUILD_TESTS=OFF
+CMAKE_DEFINE PICOQUIC_FETCH_PTLS=OFF
+CMAKE_DEFINE BUILD_DEMO=OFF
+CMAKE_DEFINE BUILD_HTTP=OFF
+CMAKE_DEFINE BUILD_PQBENCH=OFF
+CMAKE_DEFINE BUILD_LOGREADER=OFF
+CMAKE_DEFINE BUILD_LOGLIB=OFF
+CMAKE_DEFINE CMAKE_INSTALL_INCLUDEDIR=include/picoquic
+TARGET picoquic::picoquic STATIC lib/libpicoquic-core.a INTERFACE include
+LINK picoquic::picoquic picotls::picotls openssl
