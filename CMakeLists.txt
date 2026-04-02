@@ -42,6 +42,7 @@ if (BUILD_TESTING)
   set(DEPOS_TEST_FAKE_CARGO_DIR "${DEPOS_TEST_TOOLS_DIR}/fake-cargo")
   file(MAKE_DIRECTORY "${DEPOS_TEST_FAKE_CARGO_DIR}")
   if (WIN32)
+    file(TO_NATIVE_PATH "${DEPOS_CLI_OUTPUT_BINARY}" DEPOS_TEST_FAKE_CARGO_SOURCE_BINARY)
     set(DEPOS_TEST_FAKE_CARGO "${DEPOS_TEST_FAKE_CARGO_DIR}/cargo.cmd")
     file(WRITE "${DEPOS_TEST_FAKE_CARGO}" [=[
 @echo off
@@ -85,7 +86,7 @@ if "%root%"=="" exit /b 1
 if not "%version%"=="0.4.0" exit /b 1
 if not "%crate%"=="depos" exit /b 1
 if not exist "%root%\\bin" mkdir "%root%\\bin"
-copy /Y "]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[" "%root%\\bin\\depos.exe" >NUL
+copy /Y "]=] "${DEPOS_TEST_FAKE_CARGO_SOURCE_BINARY}" [=[" "%root%\\bin\\depos.exe" >NUL
 ]=])
   else()
     set(DEPOS_TEST_FAKE_CARGO "${DEPOS_TEST_FAKE_CARGO_DIR}/cargo")
