@@ -651,7 +651,7 @@ fn depofile_rejects_git_submodules_without_preceding_git_source() {
 fn checked_local_depofiles_parse_cleanly() {
     let mut depofiles = Vec::new();
     collect_named_files(
-        Path::new("/root/depos/depofiles/local"),
+        &repo_root().join("depofiles/local"),
         "main.DepoFile",
         &mut depofiles,
     );
@@ -666,7 +666,7 @@ fn checked_local_depofiles_parse_cleanly() {
 
 #[test]
 fn generated_local_depofiles_are_in_sync_with_canonical_schemas() {
-    let status = Command::new("/root/depos/tools/regenerate-local-depofiles.sh")
+    let status = Command::new(repo_root().join("tools/regenerate-local-depofiles.sh"))
         .arg("--check")
         .status()
         .expect("run local depofile generator check");
@@ -3632,7 +3632,7 @@ fn create_cascade_library_repo(
         &[
             (
                 ".depos.cmake".to_string(),
-                fs::read_to_string("/root/depos/.depos.cmake").expect("read repo helper"),
+                fs::read_to_string(repo_root().join(".depos.cmake")).expect("read repo helper"),
             ),
             (
                 "CMakeLists.txt".to_string(),
@@ -3688,7 +3688,7 @@ fn create_cascade_consumer_project(
 ) {
     fs::create_dir_all(consumer_root).expect("create consumer root");
     fs::copy(
-        "/root/depos/.depos.cmake",
+        repo_root().join(".depos.cmake"),
         consumer_root.join(".depos.cmake"),
     )
     .expect("copy helper into consumer root");
@@ -3721,12 +3721,13 @@ fn create_cascade_consumer_project(
 #[test]
 fn cmake_depend_functions_emit_status_updates() {
     let sandbox = Sandbox::new();
-    let smoke_source = Path::new("/root/depos/tests/smoke");
+    let repo_root = repo_root();
+    let smoke_source = repo_root.join("tests/smoke");
     let depos_binary = PathBuf::from(env!("CARGO_BIN_EXE_depos"));
 
     let explicit_build = sandbox.depos_root().join("cmake-status").join("explicit");
     let explicit_output = configure_cmake_capture_output(
-        smoke_source,
+        &smoke_source,
         &explicit_build,
         &[
             (
@@ -3750,7 +3751,7 @@ fn cmake_depend_functions_emit_status_updates() {
 
     let files_build = sandbox.depos_root().join("cmake-status").join("files");
     let files_output = configure_cmake_capture_output(
-        smoke_source,
+        &smoke_source,
         &files_build,
         &[
             (
@@ -3773,7 +3774,7 @@ fn cmake_depend_functions_emit_status_updates() {
 
     let all_build = sandbox.depos_root().join("cmake-status").join("all");
     let all_output = configure_cmake_capture_output(
-        smoke_source,
+        &smoke_source,
         &all_build,
         &[
             (
@@ -3803,12 +3804,12 @@ fn cmake_bootstrap_reads_repo_local_project_defaults() {
     let project_root = sandbox.depos_root().join("cmake-project-defaults");
     fs::create_dir_all(&project_root).expect("create project root");
     fs::copy(
-        "/root/depos/.depos.cmake",
+        repo_root().join(".depos.cmake"),
         project_root.join(".depos.cmake"),
     )
     .expect("copy helper into project root");
     fs::copy(
-        "/root/depos/tests/smoke/main.cpp",
+        repo_root().join("tests/smoke/main.cpp"),
         project_root.join("main.cpp"),
     )
     .expect("copy smoke source");
@@ -3818,7 +3819,7 @@ fn cmake_bootstrap_reads_repo_local_project_defaults() {
     )
     .expect("write project defaults");
     copy_tree(
-        Path::new("/root/depos/tests/smoke/fixtures/local"),
+        &repo_root().join("tests/smoke/fixtures/local"),
         &project_root.join("depofiles"),
     );
     fs::write(
@@ -4046,6 +4047,13 @@ fn collect_named_files(root: &Path, file_name: &str, output: &mut Vec<PathBuf>) 
             output.push(path);
         }
     }
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .to_path_buf()
 }
 
 struct Sandbox {

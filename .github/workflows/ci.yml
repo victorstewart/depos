@@ -28,14 +28,20 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y umoci
+          sudo apt-get install -y cargo rustc cmake meson ninja-build qemu-user-static umoci
 
       - name: Set up MSVC environment
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Rust tests
+      - name: Rust tests (Unix)
+        if: runner.os != 'Windows'
         shell: bash
+        run: cargo test --locked --manifest-path cli/Cargo.toml
+
+      - name: Rust tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: cargo test --locked --manifest-path cli/Cargo.toml
 
       - name: Cargo fmt
@@ -53,8 +59,17 @@ jobs:
         shell: bash
         run: ./tools/regenerate-local-depofiles.sh --check
 
-      - name: Repo CMake smoke
+      - name: Repo CMake smoke (Unix)
+        if: runner.os != 'Windows'
         shell: bash
+        run: |
+          cmake --fresh -S . -B build/ci -DBUILD_TESTING=ON
+          cmake --build build/ci --parallel
+          ctest --test-dir build/ci --output-on-failure --no-tests=error --parallel
+
+      - name: Repo CMake smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           cmake --fresh -S . -B build/ci -DBUILD_TESTING=ON
           cmake --build build/ci --parallel
