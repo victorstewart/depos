@@ -1011,7 +1011,11 @@ fn materialize_local_package(
         Ok(paths) => paths,
         Err(error) => {
             write_materialization_log(depos_root, spec, &log)?;
-            return Err(error);
+            return Err(error.context(format!(
+                "materialization log for {}:\n{}",
+                spec.package_id(),
+                log
+            )));
         }
     };
 
@@ -1699,11 +1703,6 @@ fn default_system_tool_environment() -> Vec<(String, String)> {
                     | "CXX"
                     | "DEVENVDIR"
                     | "EXTERNAL_INCLUDE"
-                    | "EXTENSIONSDKDIR"
-                    | "FRAMEWORKDIR"
-                    | "FRAMEWORKDIR64"
-                    | "FRAMEWORKVERSION"
-                    | "FRAMEWORKVERSION64"
                     | "INCLUDE"
                     | "LIB"
                     | "LIBPATH"
@@ -1730,10 +1729,24 @@ fn default_system_tool_environment() -> Vec<(String, String)> {
                     | "WINDOWSSDKVERBINPATH"
                     | "_CL_"
                     | "_LINK_"
-            ) || upper.starts_with("VSCMD_");
+            ) || upper.starts_with("__VSCMD_")
+                || upper.starts_with("EXTENSIONSDK")
+                || upper.starts_with("FRAMEWORK")
+                || upper.starts_with("UCRT")
+                || upper.starts_with("UNIVERSALCRT")
+                || upper.starts_with("VC")
+                || upper.starts_with("VSCMD_")
+                || upper.starts_with("VS")
+                || upper.starts_with("WINDOWS");
             if preserve {
                 env.insert(key, value);
             }
+        }
+        if env.contains_key("VSINSTALLDIR") {
+            env.entry("CC".to_string())
+                .or_insert_with(|| "cl".to_string());
+            env.entry("CXX".to_string())
+                .or_insert_with(|| "cl".to_string());
         }
         env.into_iter().collect()
     }
