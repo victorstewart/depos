@@ -1430,13 +1430,14 @@ struct PortableCommandPaths {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn portable_command_paths(job_root: &Path) -> Result<PortableCommandPaths> {
+    let normalized_job_root = normalize_host_path(job_root);
     Ok(PortableCommandPaths {
-        job_root: job_root.to_path_buf(),
-        source_dir: portable_cell_host_path(job_root, CELL_SOURCE_DIR)?,
-        build_dir: portable_cell_host_path(job_root, CELL_BUILD_DIR)?,
-        prefix_dir: portable_cell_host_path(job_root, CELL_PREFIX_DIR)?,
-        deps_dir: portable_cell_host_path(job_root, CELL_DEPS_DIR)?,
-        tmp_dir: portable_cell_host_path(job_root, CELL_TMP_DIR)?,
+        job_root: normalized_job_root.clone(),
+        source_dir: portable_cell_host_path(&normalized_job_root, CELL_SOURCE_DIR)?,
+        build_dir: portable_cell_host_path(&normalized_job_root, CELL_BUILD_DIR)?,
+        prefix_dir: portable_cell_host_path(&normalized_job_root, CELL_PREFIX_DIR)?,
+        deps_dir: portable_cell_host_path(&normalized_job_root, CELL_DEPS_DIR)?,
+        tmp_dir: portable_cell_host_path(&normalized_job_root, CELL_TMP_DIR)?,
     })
 }
 
@@ -1445,7 +1446,7 @@ fn portable_cell_host_path(job_root: &Path, cell_path: &str) -> Result<PathBuf> 
     if !cell_path.starts_with('/') {
         bail!("portable build-cell path must be absolute: {cell_path}");
     }
-    let mut output = job_root.to_path_buf();
+    let mut output = normalize_host_path(job_root);
     for component in cell_path.split('/') {
         match component {
             "" | "." => {}
@@ -1453,7 +1454,7 @@ fn portable_cell_host_path(job_root: &Path, cell_path: &str) -> Result<PathBuf> 
             normal => output.push(normal),
         }
     }
-    Ok(output)
+    Ok(normalize_host_path(&output))
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -6620,6 +6621,23 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
     fs::canonicalize(path).with_context(|| format!("failed to canonicalize {}", path.display()))
 }
 
+#[cfg(target_os = "windows")]
+fn normalize_host_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{stripped}"));
+    }
+    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_host_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 fn ensure_relative_confined_path(path: &Path, context: &str) -> Result<()> {
     if path.is_absolute() {
         bail!("{context} must be relative, got '{}'", path.display());
@@ -6668,7 +6686,9 @@ fn cmake_escape(value: &str) -> String {
 }
 
 fn display_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    normalize_host_path(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
