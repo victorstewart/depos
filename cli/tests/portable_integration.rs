@@ -93,7 +93,7 @@ fn sync_rejects_build_root_scratch_off_linux() {
         ),
     )
     .expect_err("BUILD_ROOT SCRATCH should be rejected off Linux");
-    assert!(format!("{error:#}").contains("BUILD_ROOT SCRATCH is only supported on Linux"));
+    assert_error_contains(&error, "BUILD_ROOT SCRATCH is only supported on Linux");
 }
 
 #[test]
@@ -112,8 +112,8 @@ fn sync_rejects_build_root_oci_off_linux() {
         ),
     )
     .expect_err("BUILD_ROOT OCI should be rejected off Linux");
-    assert!(format!("{error:#}").contains("BUILD_ROOT OCI"));
-    assert!(format!("{error:#}").contains("only supported on Linux"));
+    assert_error_contains(&error, "BUILD_ROOT OCI");
+    assert_error_contains(&error, "only supported on Linux");
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn sync_rejects_toolchain_rootfs_off_linux() {
         ),
     )
     .expect_err("TOOLCHAIN ROOTFS should be rejected off Linux");
-    assert!(format!("{error:#}").contains("TOOLCHAIN ROOTFS is only supported on Linux"));
+    assert_error_contains(&error, "TOOLCHAIN ROOTFS is only supported on Linux");
 }
 
 #[test]
@@ -153,8 +153,10 @@ fn sync_rejects_non_host_native_build_request_off_linux() {
         ),
     )
     .expect_err("non-host-native request should be rejected off Linux");
-    assert!(format!("{error:#}")
-        .contains("non-Linux backends only support host-native BUILD_ROOT SYSTEM"));
+    assert_error_contains(
+        &error,
+        "non-Linux backends only support host-native BUILD_ROOT SYSTEM",
+    );
 }
 
 fn sync_with_depofile(sandbox: &Sandbox, name: &str, depofile: &str) -> anyhow::Result<()> {
@@ -180,6 +182,14 @@ fn static_library_file_name(name: &str) -> String {
     } else {
         format!("lib{name}.a")
     }
+}
+
+fn assert_error_contains(error: &anyhow::Error, expected: &str) {
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains(expected),
+        "expected error containing {expected:?}, got: {rendered}"
+    );
 }
 
 fn portable_path(path: &Path) -> String {

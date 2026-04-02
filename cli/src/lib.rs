@@ -2438,6 +2438,32 @@ fn resolve_git_source(
     Ok(desired_commit)
 }
 
+fn git_source_command_argument(url: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let path = Path::new(url);
+        if path.is_absolute() {
+            return path.display().to_string();
+        }
+    }
+    url.to_string()
+}
+
+fn git_source_identity(url: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let path = Path::new(url);
+        if path.is_absolute() {
+            return display_path(path);
+        }
+        return url.replace('\\', "/");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        url.to_string()
+    }
+}
+
 fn ensure_git_clone(url: &str, source_root: &Path, log: &mut String) -> Result<bool> {
     if source_root.exists() {
         if is_git_worktree(source_root) && git_remote_matches_url(source_root, url)? {
@@ -2450,13 +2476,14 @@ fn ensure_git_clone(url: &str, source_root: &Path, log: &mut String) -> Result<b
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    let clone_source = git_source_command_argument(url);
     run_command(
         log,
         None,
         "git",
         vec![
             "clone".to_string(),
-            url.to_string(),
+            clone_source,
             source_root.display().to_string(),
         ],
         Some(source_root),
@@ -2569,7 +2596,7 @@ fn is_git_worktree(source_root: &Path) -> bool {
 fn git_remote_matches_url(source_root: &Path, url: &str) -> Result<bool> {
     Ok(
         git_output(source_root, ["config", "--get", "remote.origin.url"])?
-            .map(|value| value.trim() == url)
+            .map(|value| git_source_identity(value.trim()) == git_source_identity(url))
             .unwrap_or(false),
     )
 }
