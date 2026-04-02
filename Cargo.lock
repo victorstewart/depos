@@ -167,6 +167,7 @@ dependencies = [
  "clap",
  "metalor",
  "sha2",
+ "tar",
  "tempfile",
 ]
 

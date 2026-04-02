@@ -5,8 +5,9 @@
 
 use depos::{host_arch, sync_registry, SyncOptions};
 use std::fs;
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use tar::Builder;
 use tempfile::TempDir;
 
 const RELEASE_NAMESPACE: &str = "release";
@@ -18,7 +19,7 @@ fn sync_builds_cargo_package_with_native_portable_backend() {
     let artifact_name = static_library_file_name(package_name);
     let artifact_stage_source = format!("cargo-target/release/{artifact_name}");
     let artifact_store_path = format!("lib/{artifact_name}");
-    let repo = sandbox.create_git_repo(
+    let archive = sandbox.create_source_archive(
         "upstreams/portable_demo",
         &[
             (
@@ -42,8 +43,8 @@ fn sync_builds_cargo_package_with_native_portable_backend() {
             "depofiles/local/{package_name}/{RELEASE_NAMESPACE}/1.0.0/main.DepoFile"
         ),
         &format!(
-            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE GIT {} HEAD\nBUILD_SYSTEM CARGO\nCARGO_BUILD cargo build --release --target-dir ${{DEPO_BUILD_DIR}}/cargo-target --manifest-path Cargo.toml\nSTAGE_FILE SOURCE include/{package_name}/demo.h include/{package_name}/demo.h\nSTAGE_FILE BUILD {artifact_stage_source} {artifact_store_path}\nTARGET {package_name}::{package_name} STATIC {artifact_store_path} INTERFACE include\n",
-            portable_git_source(&repo)
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_SYSTEM CARGO\nCARGO_BUILD cargo build --release --target-dir ${{DEPO_BUILD_DIR}}/cargo-target --manifest-path Cargo.toml\nSTAGE_FILE SOURCE include/{package_name}/demo.h include/{package_name}/demo.h\nSTAGE_FILE BUILD {artifact_stage_source} {artifact_store_path}\nTARGET {package_name}::{package_name} STATIC {artifact_store_path} INTERFACE include\n",
+            portable_file_url(&archive)
         ),
     );
     sandbox.write(
@@ -80,7 +81,7 @@ fn sync_builds_cargo_package_with_native_portable_backend() {
 #[test]
 fn sync_rejects_build_root_scratch_off_linux() {
     let sandbox = Sandbox::new();
-    let repo = sandbox.create_git_repo(
+    let archive = sandbox.create_source_archive(
         "upstreams/scratch_demo",
         &[("include/scratch_demo/demo.h", "// demo\n")],
     );
@@ -88,8 +89,8 @@ fn sync_rejects_build_root_scratch_off_linux() {
         &sandbox,
         "scratch_demo",
         &format!(
-            "NAME scratch_demo\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nBUILD_ROOT SCRATCH\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET scratch_demo::scratch_demo INTERFACE include\n",
-            portable_git_source(&repo)
+            "NAME scratch_demo\nVERSION 1.0.0\nSOURCE URL {}\nBUILD_ROOT SCRATCH\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET scratch_demo::scratch_demo INTERFACE include\n",
+            portable_file_url(&archive)
         ),
     )
     .expect_err("BUILD_ROOT SCRATCH should be rejected off Linux");
@@ -99,7 +100,7 @@ fn sync_rejects_build_root_scratch_off_linux() {
 #[test]
 fn sync_rejects_build_root_oci_off_linux() {
     let sandbox = Sandbox::new();
-    let repo = sandbox.create_git_repo(
+    let archive = sandbox.create_source_archive(
         "upstreams/oci_demo",
         &[("include/oci_demo/demo.h", "// demo\n")],
     );
@@ -107,8 +108,8 @@ fn sync_rejects_build_root_oci_off_linux() {
         &sandbox,
         "oci_demo",
         &format!(
-            "NAME oci_demo\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET oci_demo::oci_demo INTERFACE include\n",
-            portable_git_source(&repo)
+            "NAME oci_demo\nVERSION 1.0.0\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET oci_demo::oci_demo INTERFACE include\n",
+            portable_file_url(&archive)
         ),
     )
     .expect_err("BUILD_ROOT OCI should be rejected off Linux");
@@ -119,7 +120,7 @@ fn sync_rejects_build_root_oci_off_linux() {
 #[test]
 fn sync_rejects_toolchain_rootfs_off_linux() {
     let sandbox = Sandbox::new();
-    let repo = sandbox.create_git_repo(
+    let archive = sandbox.create_source_archive(
         "upstreams/rootfs_demo",
         &[("include/rootfs_demo/demo.h", "// demo\n")],
     );
@@ -127,8 +128,8 @@ fn sync_rejects_toolchain_rootfs_off_linux() {
         &sandbox,
         "rootfs_demo",
         &format!(
-            "NAME rootfs_demo\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET rootfs_demo::rootfs_demo INTERFACE include\n",
-            portable_git_source(&repo)
+            "NAME rootfs_demo\nVERSION 1.0.0\nSOURCE URL {}\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET rootfs_demo::rootfs_demo INTERFACE include\n",
+            portable_file_url(&archive)
         ),
     )
     .expect_err("TOOLCHAIN ROOTFS should be rejected off Linux");
@@ -138,7 +139,7 @@ fn sync_rejects_toolchain_rootfs_off_linux() {
 #[test]
 fn sync_rejects_non_host_native_build_request_off_linux() {
     let sandbox = Sandbox::new();
-    let repo = sandbox.create_git_repo(
+    let archive = sandbox.create_source_archive(
         "upstreams/cross_demo",
         &[("include/cross_demo/demo.h", "// demo\n")],
     );
@@ -146,8 +147,8 @@ fn sync_rejects_non_host_native_build_request_off_linux() {
         &sandbox,
         "cross_demo",
         &format!(
-            "NAME cross_demo\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET cross_demo::cross_demo INTERFACE include\n",
-            portable_git_source(&repo),
+            "NAME cross_demo\nVERSION 1.0.0\nSOURCE URL {}\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET cross_demo::cross_demo INTERFACE include\n",
+            portable_file_url(&archive),
             host_arch(),
             foreign_arch(),
         ),
@@ -196,7 +197,7 @@ fn portable_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn portable_git_source(path: &Path) -> String {
+fn portable_file_url(path: &Path) -> String {
     let path = portable_path(path);
     if cfg!(windows) {
         format!("file:///{path}")
@@ -254,78 +255,33 @@ impl Sandbox {
         fs::write(path, contents).expect("write file");
     }
 
-    fn create_git_repo(&self, relative: &str, files: &[(&str, &str)]) -> PathBuf {
-        let repo = self.root.path().join(relative);
-        fs::create_dir_all(&repo).expect("create repo");
+    fn create_source_archive(&self, relative: &str, files: &[(&str, &str)]) -> PathBuf {
+        let source_root = self.root.path().join(relative);
+        fs::create_dir_all(&source_root).expect("create source root");
         for (path, contents) in files {
-            let file_path = repo.join(path);
+            let file_path = source_root.join(path);
             if let Some(parent) = file_path.parent() {
-                fs::create_dir_all(parent).expect("create repo parent");
+                fs::create_dir_all(parent).expect("create source parent");
             }
-            fs::write(file_path, contents).expect("write repo file");
+            fs::write(file_path, contents).expect("write source file");
         }
-        run_command(&repo, ["git", "init", "--quiet"]);
-        run_command(
-            &repo,
-            ["git", "config", "user.email", "codex@example.invalid"],
-        );
-        run_command(&repo, ["git", "config", "user.name", "Codex"]);
-        run_command(&repo, ["git", "add", "."]);
-        run_command(&repo, ["git", "commit", "--quiet", "-m", "init"]);
-        repo
+        let archive_root = Path::new(relative)
+            .file_name()
+            .expect("archive root name")
+            .to_string_lossy()
+            .to_string();
+        let archive_path = self.root.path().join(format!("{relative}.tar"));
+        if let Some(parent) = archive_path.parent() {
+            fs::create_dir_all(parent).expect("create archive parent");
+        }
+        let archive_file = File::create(&archive_path).expect("create archive");
+        let mut builder = Builder::new(archive_file);
+        for (path, _) in files {
+            builder
+                .append_path_with_name(source_root.join(path), format!("{archive_root}/{path}"))
+                .expect("append archive entry");
+        }
+        builder.finish().expect("finish archive");
+        archive_path
     }
-}
-
-fn run_command<const N: usize>(current_dir: &Path, argv: [&str; N]) {
-    let status = Command::new(resolve_tool(argv[0]))
-        .current_dir(current_dir)
-        .args(&argv[1..])
-        .status()
-        .unwrap_or_else(|error| panic!("spawn {} failed: {error}", argv[0]));
-    assert!(status.success(), "{} failed with {status}", argv[0]);
-}
-
-fn resolve_tool(tool: &str) -> PathBuf {
-    if let Some(path) = std::env::var_os("PATH").and_then(|value| {
-        let needs_windows_extension_search = cfg!(windows) && Path::new(tool).extension().is_none();
-        let pathext = if needs_windows_extension_search {
-            std::env::var_os("PATHEXT")
-                .map(|value| {
-                    value
-                        .to_string_lossy()
-                        .split(';')
-                        .filter(|value| !value.is_empty())
-                        .map(|value| value.to_string())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(|| {
-                    vec![
-                        ".COM".to_string(),
-                        ".EXE".to_string(),
-                        ".BAT".to_string(),
-                        ".CMD".to_string(),
-                    ]
-                })
-        } else {
-            vec![String::new()]
-        };
-        std::env::split_paths(&value).find_map(|directory| {
-            if needs_windows_extension_search {
-                for extension in &pathext {
-                    let candidate = directory.join(format!("{tool}{extension}"));
-                    if candidate.is_file() {
-                        return Some(candidate);
-                    }
-                }
-            }
-            let direct = directory.join(tool);
-            if direct.is_file() {
-                return Some(direct);
-            }
-            None
-        })
-    }) {
-        return path;
-    }
-    PathBuf::from(tool)
 }

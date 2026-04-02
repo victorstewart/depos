@@ -2765,7 +2765,24 @@ fn download_url_archive(url: &str, archive_path: &Path, log: &mut String) -> Res
 }
 
 fn file_url_path(url: &str) -> Option<PathBuf> {
-    url.strip_prefix("file://").map(PathBuf::from)
+    let raw = url.strip_prefix("file://")?;
+    #[cfg(target_os = "windows")]
+    {
+        let raw = if raw.len() >= 4
+            && raw.starts_with('/')
+            && raw.as_bytes()[2] == b':'
+            && raw.as_bytes()[1].is_ascii_alphabetic()
+        {
+            &raw[1..]
+        } else {
+            raw
+        };
+        return Some(PathBuf::from(raw));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Some(PathBuf::from(raw))
+    }
 }
 
 fn validate_archive_entries(archive_path: &Path) -> Result<()> {
