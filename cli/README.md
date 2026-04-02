@@ -20,7 +20,7 @@ Preferred resolution order for consuming projects:
 
 ## Root
 
-`depos` uses one root, `depos_root`. It defaults to `~/.depos`.
+`depos` uses one root, `depos_root`. It defaults to `~/.depos` on Unix and `%USERPROFILE%\.depos` on Windows.
 
 That root holds:
 
@@ -86,7 +86,22 @@ cargo install depos --version 0.4.0
 
 ## Current scope
 
-Package build execution is Linux-only today.
+Package build execution works natively on Linux, macOS, and Windows.
+
+Current backend contract:
+
+- Linux: `BUILD_ROOT SYSTEM`, `BUILD_ROOT SCRATCH`, `BUILD_ROOT OCI <ref>`, `TOOLCHAIN ROOTFS`, and foreign-architecture OCI execution
+- macOS: `BUILD_ROOT SYSTEM` only in this pass
+- Windows: `BUILD_ROOT SYSTEM` only in this pass
+
+On macOS and Windows, `depos` rejects the Linux-only runtime features with clear errors:
+
+- `BUILD_ROOT SCRATCH`
+- `BUILD_ROOT OCI <ref>`
+- `TOOLCHAIN ROOTFS`
+- `BUILD_ARCH != TARGET_ARCH`
+
+The OpenSSL example below is Linux-oriented. On macOS and Windows, keep `BUILD_ROOT SYSTEM` and use host-native build commands for that platform instead of Linux-only isolation directives.
 
 Example `DepoFile`:
 

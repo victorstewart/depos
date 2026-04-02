@@ -62,3 +62,28 @@ fn status_uses_explicit_depos_root_instead_of_default() {
         default_root.display()
     );
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn status_defaults_depos_root_to_userprofile_when_home_is_unset() {
+    let temp_home = TempDir::new().expect("failed to create temp home");
+    let default_root = temp_home.path().join(".depos");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_depos"))
+        .arg("status")
+        .env_remove("HOME")
+        .env("USERPROFILE", temp_home.path())
+        .output()
+        .expect("failed to run depos status");
+
+    assert!(
+        output.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        default_root.is_dir(),
+        "expected {} to exist",
+        default_root.display()
+    );
+}

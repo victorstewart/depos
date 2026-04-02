@@ -4,9 +4,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use depos::{
-    collect_statuses, register_depofile, registry_dir_from_manifest, sync_registry,
-    unregister_depofile, RegisterOptions, StatusOptions, SyncOptions, UnregisterOptions,
+    collect_statuses, default_depos_root_path, register_depofile, registry_dir_from_manifest,
+    sync_registry, unregister_depofile, RegisterOptions, StatusOptions, SyncOptions,
+    UnregisterOptions,
 };
+#[cfg(target_os = "linux")]
 use metalor::{run_isolated_container_command, BindMount, ContainerRunCommand};
 use std::path::PathBuf;
 
@@ -32,6 +34,7 @@ enum Command {
         #[arg(long)]
         manifest: PathBuf,
     },
+    #[cfg(target_os = "linux")]
     #[command(hide = true, name = "internal-run")]
     InternalRun {
         #[arg(long)]
@@ -86,10 +89,7 @@ enum Command {
 }
 
 fn default_depos_root() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".depos")
+    default_depos_root_path()
 }
 
 fn main() -> Result<()> {
@@ -117,6 +117,7 @@ fn main() -> Result<()> {
                 println!("{}", package.spec.package_id());
             }
         }
+        #[cfg(target_os = "linux")]
         Command::InternalRun {
             root,
             cwd,

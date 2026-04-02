@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - multi-os
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux runtime test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y umoci
+
+      - name: Set up MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Rust tests
+        shell: bash
+        run: cargo test --locked --manifest-path cli/Cargo.toml
+
+      - name: Cargo fmt
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cargo fmt --all --check
+
+      - name: Cargo package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cargo package --allow-dirty --locked --no-verify --manifest-path cli/Cargo.toml
+
+      - name: Check generated depofiles
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./tools/regenerate-local-depofiles.sh --check
+
+      - name: Repo CMake smoke
+        shell: bash
+        run: |
+          cmake --fresh -S . -B build/ci -DBUILD_TESTING=ON
+          cmake --build build/ci --parallel
+          ctest --test-dir build/ci --output-on-failure --no-tests=error --parallel

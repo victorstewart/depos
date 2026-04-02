@@ -207,6 +207,16 @@ function(depos_default_root out_var)
     set(_depos_runtime_root "$ENV{DEPOS_ROOT}")
   elseif (DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
     set(_depos_runtime_root "$ENV{HOME}/.depos")
+  elseif (WIN32 AND DEFINED ENV{USERPROFILE} AND NOT "$ENV{USERPROFILE}" STREQUAL "")
+    set(_depos_runtime_root "$ENV{USERPROFILE}/.depos")
+  elseif (
+    WIN32
+    AND DEFINED ENV{HOMEDRIVE}
+    AND NOT "$ENV{HOMEDRIVE}" STREQUAL ""
+    AND DEFINED ENV{HOMEPATH}
+    AND NOT "$ENV{HOMEPATH}" STREQUAL ""
+  )
+    set(_depos_runtime_root "$ENV{HOMEDRIVE}$ENV{HOMEPATH}/.depos")
   else()
     message(FATAL_ERROR "Unable to determine DEPOS_ROOT.")
   endif()
@@ -261,7 +271,7 @@ function(_depos_state_file out_var)
 endfunction()
 
 function(_depos_bootstrap_binary_path out_var)
-  set(${out_var} "${DEPOS_BOOTSTRAP_DIR}/.tool/bin/depos" PARENT_SCOPE)
+  set(${out_var} "${DEPOS_BOOTSTRAP_DIR}/.tool/bin/depos${CMAKE_EXECUTABLE_SUFFIX}" PARENT_SCOPE)
 endfunction()
 
 function(_depos_internal_namespace out_var local_mode)

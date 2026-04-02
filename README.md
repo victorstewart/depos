@@ -2,7 +2,7 @@
 
 `depos` is an external dependency builder and repository manager for C and C++ projects.
 
-You describe a dependency once in a small line-oriented `DepoFile`. `depos` fetches the source, builds it in an isolated Linux runtime, publishes the result into a versioned repository, reuses unchanged local materializations and cached sources, and generates a CMake registry that consumer projects can import from a manifest. Changing the registered `DepoFile`, the resolved source, or a local dependency forces rematerialization.
+You describe a dependency once in a small line-oriented `DepoFile`. `depos` fetches the source, builds it natively on Linux, macOS, and Windows, publishes the result into a versioned repository, reuses unchanged local materializations and cached sources, and generates a CMake registry that consumer projects can import from a manifest. Linux also supports the advanced isolated runtime modes for scratch and OCI-backed builds. Changing the registered `DepoFile`, the resolved source, or a local dependency forces rematerialization.
 
 ## Distribution contract
 
@@ -18,7 +18,7 @@ Primary distribution is GitHub release binaries. `cargo install depos --version 
 
 ## Root
 
-`depos` uses one root, `depos_root`. It defaults to `~/.depos`.
+`depos` uses one root, `depos_root`. It defaults to `~/.depos` on Unix and `%USERPROFILE%\.depos` on Windows.
 
 Registered recipes, materialized packages, and generated registries all live under that same root:
 
@@ -126,9 +126,26 @@ depos_require(zlib VERSION 1.3.2)
 depos_require(openssl VERSION 3.4.1)
 ```
 
+## Platform contract
+
+Implemented today:
+
+- Linux native execution with `BUILD_ROOT SYSTEM`, `BUILD_ROOT SCRATCH`, and `BUILD_ROOT OCI <ref>`
+- Linux `TOOLCHAIN ROOTFS`
+- Linux foreign-architecture OCI execution via staged `qemu-*-static`
+- macOS native execution with `BUILD_ROOT SYSTEM`
+- Windows native execution with `BUILD_ROOT SYSTEM`
+
+On macOS and Windows, `depos` rejects the Linux-only runtime features with clear errors:
+
+- `BUILD_ROOT SCRATCH`
+- `BUILD_ROOT OCI <ref>`
+- `TOOLCHAIN ROOTFS`
+- `BUILD_ARCH != TARGET_ARCH`
+
 ## Why Isolated Build Roots Matter
 
-The strongest utility `depos` provides is not just downloading dependencies. It is the ability to build packages in an isolated root so the build cannot silently reach into the host machine's `/usr` and `/lib` trees unless you deliberately expose them.
+On Linux, the strongest utility `depos` provides is not just downloading dependencies. It is the ability to build packages in an isolated root so the build cannot silently reach into the host machine's `/usr` and `/lib` trees unless you deliberately expose them.
 
 The clean mental model is:
 
@@ -190,6 +207,8 @@ Using isolated build roots gives you three practical wins:
 
 ## Example `DepoFile`s
 
+The OpenSSL examples below are Linux-oriented on purpose. They demonstrate Linux-only scratch and OCI isolation modes. On macOS and Windows, keep `BUILD_ROOT SYSTEM` and use host-native build commands for that platform instead of `BUILD_ROOT SCRATCH`, `BUILD_ROOT OCI`, `TOOLCHAIN ROOTFS`, or foreign-architecture requests.
+
 Simple package:
 
 ```text
@@ -250,12 +269,12 @@ LINK openssl openssl::crypto openssl::ssl
 
 Implemented today:
 
-- Linux-only runtime behavior
 - CMake, Meson, Autoconf, Cargo, and Manual recipe families
-- `BUILD_ROOT SYSTEM`
-- `BUILD_ROOT SCRATCH`
-- `BUILD_ROOT OCI <ref>`
-- foreign-architecture OCI execution via staged `qemu-*-static`
+- native `BUILD_ROOT SYSTEM` execution on Linux, macOS, and Windows
+- Linux-only advanced runtime behavior:
+  `BUILD_ROOT SCRATCH`, `BUILD_ROOT OCI <ref>`, `TOOLCHAIN ROOTFS`, and foreign-architecture OCI execution via staged `qemu-*-static`
+
+On macOS and Windows, `BUILD_ROOT SCRATCH`, `BUILD_ROOT OCI <ref>`, `TOOLCHAIN ROOTFS`, and `BUILD_ARCH != TARGET_ARCH` are rejected explicitly instead of silently degrading.
 
 `DepoFile`s are trusted inputs. `depos` is not a hostile-code sandbox.
 

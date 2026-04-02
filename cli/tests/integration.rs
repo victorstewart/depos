@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 // Copyright 2026 Victor Stewart
 // SPDX-License-Identifier: Apache-2.0
 

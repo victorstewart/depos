@@ -2,9 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(target_os = "macos")]
+use metalor::runtime::macos::{
+    prepare_job as prepare_portable_worker_job, sync_worker_caches as sync_portable_worker_caches,
+};
+#[cfg(target_os = "windows")]
+use metalor::runtime::windows::{
+    prepare_job as prepare_portable_worker_job, sync_worker_caches as sync_portable_worker_caches,
+};
+#[cfg(target_os = "linux")]
 use metalor::{
-    build_unshare_reexec_command, interpolate_braced_variables, prepare_oci_rootfs,
-    prepare_runtime_emulator, significant_lines, valid_identifier, BindMount, ContainerRunCommand,
+    build_unshare_reexec_command, prepare_oci_rootfs, prepare_runtime_emulator, BindMount,
+    ContainerRunCommand,
+};
+use metalor::{interpolate_braced_variables, significant_lines, valid_identifier};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use metalor::{
+    BuildCellSpec, CacheSpec, CellPath, CleanupPolicy, CommandSpec, HostPath, ImportSpec,
+    NetworkPolicy, WorkspaceSeed,
 };
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -12,11 +27,47 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::{self, Display};
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 const DEFAULT_NAMESPACE: &str = "release";
+const CELL_SOURCE_DIR: &str = "/work/source";
+const CELL_BUILD_DIR: &str = "/work/build";
+const CELL_PREFIX_DIR: &str = "/work/prefix";
+const CELL_DEPS_DIR: &str = "/depos";
+const CELL_TMP_DIR: &str = "/tmp";
+
+pub fn default_depos_root_path() -> PathBuf {
+    host_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".depos")
+}
+
+fn host_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let path = std::env::var_os("HOMEPATH")?;
+            let mut output = PathBuf::from(drive);
+            output.push(path);
+            Some(output)
+        })
+}
+
+fn host_path_separator() -> char {
+    if cfg!(windows) {
+        ';'
+    } else {
+        ':'
+    }
+}
+
+fn join_host_path_list(paths: &[String]) -> String {
+    let separator = host_path_separator().to_string();
+    paths.join(&separator)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackageSystemLibs {
@@ -1097,6 +1148,7 @@ fn prepare_package_source(preparation: &SourcePreparationPlan, log: &mut String)
     }
 }
 
+#[cfg(target_os = "linux")]
 fn execute_command_pipeline(
     depos_root: &Path,
     store_root: &Path,
@@ -1212,6 +1264,124 @@ fn execute_command_pipeline(
     copy_declared_exports(depos_root, &work_prefix, store_root, spec, log)
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn execute_command_pipeline(
+    depos_root: &Path,
+    store_root: &Path,
+    spec: &PackageSpec,
+    _executable: &Path,
+    source_root: &Path,
+    log: &mut String,
+) -> Result<Vec<PathBuf>> {
+    validate_supported_command_pipeline(spec)?;
+    let variant = variant_for_target_arch(&spec.target_arch)?;
+    let variant_root = depos_root.join("store").join(&variant);
+    let dependency_specs = resolve_dependency_specs(depos_root, spec)?;
+
+    let runtime_root_prefix = depos_root.join(".run").join("metalor-runtime");
+    let runtime_package_root = runtime_root_prefix
+        .join(&spec.name)
+        .join(&spec.namespace)
+        .join(&spec.version);
+    if runtime_package_root.exists() {
+        fs::remove_dir_all(&runtime_package_root)
+            .with_context(|| format!("failed to remove {}", runtime_package_root.display()))?;
+    }
+    fs::create_dir_all(&runtime_package_root)
+        .with_context(|| format!("failed to create {}", runtime_package_root.display()))?;
+
+    let job_root = runtime_package_root.join("job");
+    let cache_root = runtime_package_root.join("cache");
+    let cache_build = cache_root.join("build");
+    let cache_prefix = cache_root.join("prefix");
+    let cache_tmp = cache_root.join("tmp");
+    let build_cell = build_portable_command_cell(
+        &runtime_package_root,
+        &cache_build,
+        &cache_prefix,
+        &cache_tmp,
+        &variant_root,
+        source_root,
+        &dependency_specs,
+    )?;
+    let job = prepare_portable_worker_job(&job_root, &build_cell).with_context(|| {
+        format!(
+            "failed to prepare portable worker job {}",
+            job_root.display()
+        )
+    })?;
+    let paths = portable_command_paths(&job.root)?;
+    let variables = build_portable_command_variables(spec, &dependency_specs, &paths)?;
+    let base_env = build_portable_command_environment(spec, &dependency_specs, &paths);
+
+    execute_portable_command_phase(
+        spec,
+        &paths,
+        &base_env,
+        &variables,
+        default_phase_cwd(spec, "CONFIGURE"),
+        "CONFIGURE",
+        &spec.configure,
+        log,
+    )?;
+    execute_portable_command_phase(
+        spec,
+        &paths,
+        &base_env,
+        &variables,
+        default_phase_cwd(spec, "BUILD"),
+        "BUILD",
+        &spec.build,
+        log,
+    )?;
+    execute_portable_command_phase(
+        spec,
+        &paths,
+        &base_env,
+        &variables,
+        default_phase_cwd(spec, "INSTALL"),
+        "INSTALL",
+        &spec.install,
+        log,
+    )?;
+
+    sync_portable_worker_caches(&build_cell, &job)
+        .context("failed to sync portable worker caches back to host")?;
+
+    apply_stage_entries(
+        &paths.source_dir,
+        &cache_build,
+        &cache_prefix,
+        &spec.stage_entries,
+        log,
+    )?;
+
+    if spec.build_system == BuildSystem::Manual
+        && spec.install.is_empty()
+        && spec.stage_entries.is_empty()
+    {
+        return copy_declared_exports_from_candidates(
+            depos_root,
+            &[
+                ExportCandidateRoot {
+                    label: "build",
+                    root: &cache_build,
+                },
+                ExportCandidateRoot {
+                    label: "source",
+                    root: &paths.source_dir,
+                },
+            ],
+            store_root,
+            spec,
+            log,
+        );
+    }
+
+    copy_declared_exports(depos_root, &cache_prefix, store_root, spec, log)
+}
+
+#[cfg(target_os = "linux")]
 fn prepare_command_container_root(
     depos_root: &Path,
     runtime_root_prefix: &Path,
@@ -1244,6 +1414,368 @@ fn prepare_command_container_root(
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct PortableCommandPaths {
+    job_root: PathBuf,
+    source_dir: PathBuf,
+    build_dir: PathBuf,
+    prefix_dir: PathBuf,
+    deps_dir: PathBuf,
+    tmp_dir: PathBuf,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn portable_command_paths(job_root: &Path) -> Result<PortableCommandPaths> {
+    Ok(PortableCommandPaths {
+        job_root: job_root.to_path_buf(),
+        source_dir: portable_cell_host_path(job_root, CELL_SOURCE_DIR)?,
+        build_dir: portable_cell_host_path(job_root, CELL_BUILD_DIR)?,
+        prefix_dir: portable_cell_host_path(job_root, CELL_PREFIX_DIR)?,
+        deps_dir: portable_cell_host_path(job_root, CELL_DEPS_DIR)?,
+        tmp_dir: portable_cell_host_path(job_root, CELL_TMP_DIR)?,
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn portable_cell_host_path(job_root: &Path, cell_path: &str) -> Result<PathBuf> {
+    if !cell_path.starts_with('/') {
+        bail!("portable build-cell path must be absolute: {cell_path}");
+    }
+    let mut output = job_root.to_path_buf();
+    for component in cell_path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => bail!("portable build-cell path must not contain '..': {cell_path}"),
+            normal => output.push(normal),
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn portable_dependency_root(job_root: &Path, dependency: &PackageSpec) -> Result<PathBuf> {
+    portable_cell_host_path(
+        job_root,
+        &format!(
+            "{}/{}",
+            CELL_DEPS_DIR,
+            display_path(&package_relative_store_root(dependency))
+        ),
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn build_portable_command_cell(
+    runtime_package_root: &Path,
+    cache_build: &Path,
+    cache_prefix: &Path,
+    cache_tmp: &Path,
+    variant_root: &Path,
+    source_root: &Path,
+    dependency_specs: &[PackageSpec],
+) -> Result<BuildCellSpec> {
+    let imports = dependency_specs
+        .iter()
+        .map(|dependency| ImportSpec {
+            source: HostPath::from(variant_root.join(package_relative_store_root(dependency))),
+            destination: CellPath::from(format!(
+                "{}/{}",
+                CELL_DEPS_DIR,
+                display_path(&package_relative_store_root(dependency))
+            )),
+        })
+        .collect::<Vec<_>>();
+    Ok(BuildCellSpec {
+        root: HostPath::from(runtime_package_root.to_path_buf()),
+        scratch: HostPath::from(runtime_package_root.join("scratch")),
+        workspace_path: CellPath::from(CELL_SOURCE_DIR),
+        workspace_seed: WorkspaceSeed::SnapshotDir(HostPath::from(source_root.to_path_buf())),
+        imports,
+        caches: vec![
+            CacheSpec {
+                source: HostPath::from(cache_build.to_path_buf()),
+                destination: CellPath::from(CELL_BUILD_DIR),
+            },
+            CacheSpec {
+                source: HostPath::from(cache_prefix.to_path_buf()),
+                destination: CellPath::from(CELL_PREFIX_DIR),
+            },
+            CacheSpec {
+                source: HostPath::from(cache_tmp.to_path_buf()),
+                destination: CellPath::from(CELL_TMP_DIR),
+            },
+        ],
+        exports: Vec::new(),
+        command: CommandSpec {
+            cwd: CellPath::from(CELL_SOURCE_DIR),
+            executable: "portable-placeholder".to_string(),
+            argv: Vec::new(),
+        },
+        env: Vec::new(),
+        network: NetworkPolicy::Enabled,
+        limits: Default::default(),
+        cleanup: CleanupPolicy::Always,
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn build_portable_command_variables(
+    spec: &PackageSpec,
+    dependency_specs: &[PackageSpec],
+    paths: &PortableCommandPaths,
+) -> Result<BTreeMap<String, String>> {
+    let mut variables = BTreeMap::new();
+    variables.insert("DEPO_PACKAGE_NAME".to_string(), spec.name.clone());
+    variables.insert("DEPO_PACKAGE_NAMESPACE".to_string(), spec.namespace.clone());
+    variables.insert("DEPO_PACKAGE_VERSION".to_string(), spec.version.clone());
+    variables.insert(
+        "DEPO_SOURCE_DIR".to_string(),
+        display_path(&paths.source_dir),
+    );
+    variables.insert("DEPO_BUILD_DIR".to_string(), display_path(&paths.build_dir));
+    variables.insert("DEPO_PREFIX".to_string(), display_path(&paths.prefix_dir));
+    variables.insert("DEPO_DEPS_DIR".to_string(), display_path(&paths.deps_dir));
+    variables.insert("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone());
+    variables.insert("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone());
+    for dependency in dependency_specs {
+        let root = display_path(&portable_dependency_root(&paths.job_root, dependency)?);
+        let namespaced_key = format!("dep:{}@{}", dependency.name, dependency.namespace);
+        variables.insert(namespaced_key, root.clone());
+        let simple_key = format!("dep:{}", dependency.name);
+        match variables.get(&simple_key) {
+            Some(existing) if existing != &root => bail!(
+                "package '{}' has multiple dependencies named '{}' across namespaces; use ${{dep:{}@<namespace>}}",
+                spec.package_id(),
+                dependency.name,
+                dependency.name
+            ),
+            Some(_) => {}
+            None => {
+                variables.insert(simple_key, root);
+            }
+        }
+    }
+    Ok(variables)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn build_portable_command_environment(
+    spec: &PackageSpec,
+    dependency_specs: &[PackageSpec],
+    paths: &PortableCommandPaths,
+) -> Vec<(String, String)> {
+    let dependency_roots = dependency_specs
+        .iter()
+        .map(|dependency| portable_dependency_root(&paths.job_root, dependency))
+        .collect::<Result<Vec<_>>>()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| display_path(&path))
+        .collect::<Vec<_>>();
+    let mut env = vec![
+        (
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        ),
+        ("HOME".to_string(), display_path(&paths.tmp_dir)),
+        ("TMPDIR".to_string(), display_path(&paths.tmp_dir)),
+        (
+            "DEPO_SOURCE_DIR".to_string(),
+            display_path(&paths.source_dir),
+        ),
+        ("DEPO_BUILD_DIR".to_string(), display_path(&paths.build_dir)),
+        ("DEPO_PREFIX".to_string(), display_path(&paths.prefix_dir)),
+        ("DEPO_DEPS_DIR".to_string(), display_path(&paths.deps_dir)),
+        ("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone()),
+        ("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone()),
+    ];
+    #[cfg(target_os = "windows")]
+    {
+        let tmp = display_path(&paths.tmp_dir);
+        env.extend([
+            ("USERPROFILE".to_string(), tmp.clone()),
+            ("TMP".to_string(), tmp.clone()),
+            ("TEMP".to_string(), tmp),
+        ]);
+        for key in [
+            "COMSPEC",
+            "ComSpec",
+            "PATHEXT",
+            "PathExt",
+            "SYSTEMDRIVE",
+            "SystemDrive",
+            "SYSTEMROOT",
+            "SystemRoot",
+            "WINDIR",
+            "Windir",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                env.push((key.to_string(), value));
+            }
+        }
+    }
+    if spec.toolchain == ToolchainSource::System {
+        env.extend(default_system_tool_environment());
+    }
+    if spec.build_system == BuildSystem::Cargo {
+        env.push((
+            "CARGO_HOME".to_string(),
+            display_path(&paths.build_dir.join("cargo-home")),
+        ));
+    } else if let Some(cargo_home) = host_rust_toolchain_dir("CARGO_HOME", ".cargo") {
+        env.push(("CARGO_HOME".to_string(), display_path(&cargo_home)));
+    }
+    if let Some(rustup_home) = host_rust_toolchain_dir("RUSTUP_HOME", ".rustup") {
+        env.push(("RUSTUP_HOME".to_string(), display_path(&rustup_home)));
+    }
+    if !dependency_roots.is_empty() {
+        env.push(("CMAKE_PREFIX_PATH".to_string(), dependency_roots.join(";")));
+        let pkg_config_dirs = dependency_roots
+            .iter()
+            .flat_map(|root| {
+                [
+                    format!("{root}/lib/pkgconfig"),
+                    format!("{root}/lib64/pkgconfig"),
+                ]
+            })
+            .collect::<Vec<_>>();
+        env.push((
+            "PKG_CONFIG_LIBDIR".to_string(),
+            join_host_path_list(&pkg_config_dirs),
+        ));
+        for (dependency, root) in dependency_specs.iter().zip(dependency_roots.iter()) {
+            env.push((
+                format!(
+                    "DEPO_DEP_{}_{}_ROOT",
+                    sanitize_env_fragment(&dependency.name),
+                    sanitize_env_fragment(&dependency.namespace)
+                ),
+                root.clone(),
+            ));
+        }
+    }
+    let effective_system_libs = match spec.system_libs {
+        PackageSystemLibs::Allow => PackageSystemLibs::Allow,
+        PackageSystemLibs::Inherit | PackageSystemLibs::Never => PackageSystemLibs::Never,
+    };
+    if effective_system_libs != PackageSystemLibs::Allow {
+        env.extend([
+            ("PKG_CONFIG_DIR".to_string(), String::new()),
+            ("PKG_CONFIG_PATH".to_string(), String::new()),
+            ("CPATH".to_string(), String::new()),
+            ("LIBRARY_PATH".to_string(), String::new()),
+            ("C_INCLUDE_PATH".to_string(), String::new()),
+            ("CPLUS_INCLUDE_PATH".to_string(), String::new()),
+        ]);
+    }
+    env
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn default_system_tool_environment() -> Vec<(String, String)> {
+    #[cfg(target_os = "macos")]
+    {
+        return vec![
+            ("CC".to_string(), "clang".to_string()),
+            ("CXX".to_string(), "clang++".to_string()),
+            ("AR".to_string(), "ar".to_string()),
+            ("RANLIB".to_string(), "ranlib".to_string()),
+            ("STRIP".to_string(), "strip".to_string()),
+            ("CFLAGS".to_string(), String::new()),
+            ("CXXFLAGS".to_string(), String::new()),
+            ("LDFLAGS".to_string(), String::new()),
+        ];
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Vec::new()
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn execute_portable_command_phase(
+    spec: &PackageSpec,
+    paths: &PortableCommandPaths,
+    base_env: &[(String, String)],
+    variables: &BTreeMap<String, String>,
+    cwd: &str,
+    phase_name: &str,
+    commands: &[Vec<String>],
+    log: &mut String,
+) -> Result<()> {
+    for command in commands {
+        let is_shell_wrapper =
+            command.len() == 4 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c";
+        let argv = command
+            .iter()
+            .map(|arg| {
+                let interpolated =
+                    interpolate_braced_variables(arg, variables, "DepoFile command variable")?;
+                if is_shell_wrapper {
+                    Ok(interpolated)
+                } else {
+                    expand_trusted_direct_command_substitutions(&interpolated)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if argv.is_empty() {
+            bail!("{} command array must not be empty", phase_name);
+        }
+        let resolved_executable = resolve_phase_executable_for_spec(spec, cwd, &argv[0])?;
+        let executable_path =
+            translate_portable_phase_executable(&paths.job_root, &resolved_executable)?;
+        let host_cwd = portable_cell_host_path(&paths.job_root, cwd)?;
+        log.push_str(&format!(
+            "run {} in {}: {}\n",
+            phase_name,
+            display_path(&host_cwd),
+            argv.join(" ")
+        ));
+        let output = Command::new(&executable_path)
+            .args(&argv[1..])
+            .current_dir(&host_cwd)
+            .env_clear()
+            .envs(base_env.iter().cloned())
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to spawn {} command '{}' in {}",
+                    phase_name,
+                    executable_path.display(),
+                    host_cwd.display()
+                )
+            })?;
+        append_process_output(log, &output.stdout, &output.stderr);
+        if !output.status.success() {
+            bail!(
+                "{} command failed with status {}",
+                phase_name,
+                output.status
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn translate_portable_phase_executable(job_root: &Path, executable: &str) -> Result<PathBuf> {
+    let is_cell_path = [
+        CELL_SOURCE_DIR,
+        CELL_BUILD_DIR,
+        CELL_PREFIX_DIR,
+        CELL_DEPS_DIR,
+        CELL_TMP_DIR,
+    ]
+    .iter()
+    .any(|root| executable == *root || executable.starts_with(&format!("{root}/")));
+    if is_cell_path {
+        portable_cell_host_path(job_root, executable)
+    } else {
+        Ok(PathBuf::from(executable))
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn validate_supported_command_pipeline(spec: &PackageSpec) -> Result<()> {
     match (&spec.build_root, &spec.toolchain) {
         (BuildRoot::System, ToolchainSource::System) => {
@@ -1306,6 +1838,43 @@ fn validate_supported_command_pipeline(spec: &PackageSpec) -> Result<()> {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn validate_supported_command_pipeline(spec: &PackageSpec) -> Result<()> {
+    if !spec.toolchain_inputs.is_empty() {
+        bail!(
+            "package '{}' uses TOOLCHAIN_INPUT, but TOOLCHAIN_INPUT is only supported on Linux BUILD_ROOT SCRATCH/OCI paths in this pass",
+            spec.package_id()
+        );
+    }
+    match (&spec.build_root, &spec.toolchain) {
+        (BuildRoot::System, ToolchainSource::System) => {}
+        (BuildRoot::System, ToolchainSource::Rootfs) => bail!(
+            "package '{}' uses TOOLCHAIN ROOTFS, but TOOLCHAIN ROOTFS is only supported on Linux",
+            spec.package_id()
+        ),
+        (BuildRoot::Scratch, _) => bail!(
+            "package '{}' uses BUILD_ROOT SCRATCH, but BUILD_ROOT SCRATCH is only supported on Linux",
+            spec.package_id()
+        ),
+        (BuildRoot::Oci(reference), _) => bail!(
+            "package '{}' uses BUILD_ROOT OCI {}, but BUILD_ROOT OCI is only supported on Linux",
+            spec.package_id(),
+            reference
+        ),
+    }
+    let host = host_arch();
+    if spec.build_arch != host || spec.target_arch != host {
+        bail!(
+            "package '{}' requests BUILD_ARCH '{}' / TARGET_ARCH '{}', but non-Linux backends only support host-native BUILD_ROOT SYSTEM in this pass",
+            spec.package_id(),
+            spec.build_arch,
+            spec.target_arch
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn prepare_command_emulator(
     container_root: &Path,
     host_arch: &str,
@@ -1327,6 +1896,7 @@ fn prepare_command_emulator(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn build_command_variables(
     spec: &PackageSpec,
     dependency_specs: &[PackageSpec],
@@ -1335,15 +1905,16 @@ fn build_command_variables(
     variables.insert("DEPO_PACKAGE_NAME".to_string(), spec.name.clone());
     variables.insert("DEPO_PACKAGE_NAMESPACE".to_string(), spec.namespace.clone());
     variables.insert("DEPO_PACKAGE_VERSION".to_string(), spec.version.clone());
-    variables.insert("DEPO_SOURCE_DIR".to_string(), "/work/source".to_string());
-    variables.insert("DEPO_BUILD_DIR".to_string(), "/work/build".to_string());
-    variables.insert("DEPO_PREFIX".to_string(), "/work/prefix".to_string());
-    variables.insert("DEPO_DEPS_DIR".to_string(), "/depos".to_string());
+    variables.insert("DEPO_SOURCE_DIR".to_string(), CELL_SOURCE_DIR.to_string());
+    variables.insert("DEPO_BUILD_DIR".to_string(), CELL_BUILD_DIR.to_string());
+    variables.insert("DEPO_PREFIX".to_string(), CELL_PREFIX_DIR.to_string());
+    variables.insert("DEPO_DEPS_DIR".to_string(), CELL_DEPS_DIR.to_string());
     variables.insert("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone());
     variables.insert("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone());
     for dependency in dependency_specs {
         let root = format!(
-            "/depos/{}",
+            "{}/{}",
+            CELL_DEPS_DIR,
             display_path(&package_relative_store_root(dependency))
         );
         let namespaced_key = format!("dep:{}@{}", dependency.name, dependency.namespace);
@@ -1367,15 +1938,14 @@ fn build_command_variables(
 
 fn host_rust_toolchain_dir(env_var: &str, home_suffix: &str) -> Option<PathBuf> {
     let from_env = std::env::var_os(env_var).map(PathBuf::from);
-    let from_home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(home_suffix));
+    let from_home = host_home_dir().map(|home| home.join(home_suffix));
     match from_env.or(from_home) {
         Some(path) if path.is_absolute() && path.exists() => Some(path),
         _ => None,
     }
 }
 
+#[cfg(target_os = "linux")]
 fn build_command_environment(
     spec: &PackageSpec,
     dependency_specs: &[PackageSpec],
@@ -1384,7 +1954,8 @@ fn build_command_environment(
         .iter()
         .map(|dependency| {
             format!(
-                "/depos/{}",
+                "{}/{}",
+                CELL_DEPS_DIR,
                 display_path(&package_relative_store_root(dependency))
             )
         })
@@ -1402,12 +1973,12 @@ fn build_command_environment(
     };
     let mut env = vec![
         ("PATH".to_string(), path_value),
-        ("HOME".to_string(), "/tmp".to_string()),
-        ("TMPDIR".to_string(), "/tmp".to_string()),
-        ("DEPO_SOURCE_DIR".to_string(), "/work/source".to_string()),
-        ("DEPO_BUILD_DIR".to_string(), "/work/build".to_string()),
-        ("DEPO_PREFIX".to_string(), "/work/prefix".to_string()),
-        ("DEPO_DEPS_DIR".to_string(), "/depos".to_string()),
+        ("HOME".to_string(), CELL_TMP_DIR.to_string()),
+        ("TMPDIR".to_string(), CELL_TMP_DIR.to_string()),
+        ("DEPO_SOURCE_DIR".to_string(), CELL_SOURCE_DIR.to_string()),
+        ("DEPO_BUILD_DIR".to_string(), CELL_BUILD_DIR.to_string()),
+        ("DEPO_PREFIX".to_string(), CELL_PREFIX_DIR.to_string()),
+        ("DEPO_DEPS_DIR".to_string(), CELL_DEPS_DIR.to_string()),
         ("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone()),
         ("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone()),
     ];
@@ -1430,7 +2001,7 @@ fn build_command_environment(
         if spec.build_system == BuildSystem::Cargo {
             env.push((
                 "CARGO_HOME".to_string(),
-                "/work/build/cargo-home".to_string(),
+                format!("{CELL_BUILD_DIR}/cargo-home"),
             ));
         } else if host_rust_toolchain_dir("CARGO_HOME", ".cargo").is_some() {
             env.push((
@@ -1465,7 +2036,8 @@ fn build_command_environment(
                     sanitize_env_fragment(&dependency.namespace)
                 ),
                 format!(
-                    "/depos/{}",
+                    "{}/{}",
+                    CELL_DEPS_DIR,
                     display_path(&package_relative_store_root(dependency))
                 ),
             ));
@@ -1488,6 +2060,7 @@ fn build_command_environment(
     env
 }
 
+#[cfg(target_os = "linux")]
 fn build_command_mounts(
     spec: &PackageSpec,
     source_root: &Path,
@@ -1496,12 +2069,12 @@ fn build_command_mounts(
     let mut mounts = Vec::new();
     mounts.push(BindMount {
         source: source_root.to_path_buf(),
-        destination: "/work/source".to_string(),
+        destination: CELL_SOURCE_DIR.to_string(),
         read_only: false,
     });
     mounts.push(BindMount {
         source: variant_root.to_path_buf(),
-        destination: "/depos".to_string(),
+        destination: CELL_DEPS_DIR.to_string(),
         read_only: true,
     });
     match spec.build_root {
@@ -1559,6 +2132,7 @@ fn build_command_mounts(
     Ok(mounts)
 }
 
+#[cfg(target_os = "linux")]
 struct PhaseExecutionContext<'a> {
     spec: &'a PackageSpec,
     executable: &'a Path,
@@ -1570,6 +2144,7 @@ struct PhaseExecutionContext<'a> {
     variables: &'a BTreeMap<String, String>,
 }
 
+#[cfg(target_os = "linux")]
 fn execute_command_phase(
     context: &PhaseExecutionContext<'_>,
     cwd: &str,
@@ -1631,7 +2206,7 @@ fn resolve_phase_executable_for_spec(
 ) -> Result<String> {
     let path = Path::new(executable);
     if path.is_absolute() || !executable.contains('/') {
-        return resolve_runtime_executable_for_spec(spec, executable);
+        return resolve_phase_executable_for_backend(spec, executable);
     }
 
     let cwd_path = Path::new(cwd);
@@ -1654,6 +2229,19 @@ fn resolve_phase_executable_for_spec(
         }
     }
     Ok(resolved.display().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_phase_executable_for_backend(spec: &PackageSpec, executable: &str) -> Result<String> {
+    match (&spec.build_root, &spec.toolchain) {
+        (BuildRoot::Oci(_), ToolchainSource::Rootfs) => Ok(executable.to_string()),
+        _ => resolve_runtime_executable(executable),
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn resolve_phase_executable_for_backend(_spec: &PackageSpec, executable: &str) -> Result<String> {
+    Ok(executable.to_string())
 }
 
 fn expand_trusted_direct_command_substitutions(value: &str) -> Result<String> {
@@ -1688,23 +2276,32 @@ fn expand_trusted_direct_command_substitutions(value: &str) -> Result<String> {
 
 fn default_phase_cwd(spec: &PackageSpec, phase_name: &str) -> &'static str {
     match spec.build_system {
-        BuildSystem::Autoconf => "/work/source",
-        BuildSystem::Cargo => "/work/source",
+        BuildSystem::Autoconf => CELL_SOURCE_DIR,
+        BuildSystem::Cargo => CELL_SOURCE_DIR,
         BuildSystem::Cmake | BuildSystem::Meson | BuildSystem::Manual => match phase_name {
-            "CONFIGURE" => "/work/source",
-            "BUILD" | "INSTALL" => "/work/build",
-            _ => "/work/source",
+            "CONFIGURE" => CELL_SOURCE_DIR,
+            "BUILD" | "INSTALL" => CELL_BUILD_DIR,
+            _ => CELL_SOURCE_DIR,
         },
     }
 }
 
-fn resolve_runtime_executable_for_spec(spec: &PackageSpec, executable: &str) -> Result<String> {
-    match (&spec.build_root, &spec.toolchain) {
-        (BuildRoot::Oci(_), ToolchainSource::Rootfs) => Ok(executable.to_string()),
-        _ => resolve_runtime_executable(executable),
+fn append_process_output(log: &mut String, stdout: &[u8], stderr: &[u8]) {
+    if !stdout.is_empty() {
+        log.push_str(&String::from_utf8_lossy(stdout));
+        if !log.ends_with('\n') {
+            log.push('\n');
+        }
+    }
+    if !stderr.is_empty() {
+        log.push_str(&String::from_utf8_lossy(stderr));
+        if !log.ends_with('\n') {
+            log.push('\n');
+        }
     }
 }
 
+#[cfg(target_os = "linux")]
 fn run_isolated_phase(
     executable: &Path,
     runtime_root_prefix: &Path,
@@ -1716,24 +2313,14 @@ fn run_isolated_phase(
     let output = command
         .output()
         .context("failed to spawn isolated depos internal-run command")?;
-    if !output.stdout.is_empty() {
-        log.push_str(&String::from_utf8_lossy(&output.stdout));
-        if !log.ends_with('\n') {
-            log.push('\n');
-        }
-    }
-    if !output.stderr.is_empty() {
-        log.push_str(&String::from_utf8_lossy(&output.stderr));
-        if !log.ends_with('\n') {
-            log.push('\n');
-        }
-    }
+    append_process_output(log, &output.stdout, &output.stderr);
     if !output.status.success() {
         bail!("isolated command failed with status {}", output.status);
     }
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn resolve_runtime_executable(executable: &str) -> Result<String> {
     if executable.starts_with('/') {
         return Ok(executable.to_string());
@@ -1747,6 +2334,7 @@ fn resolve_runtime_executable(executable: &str) -> Result<String> {
     bail!("unable to resolve executable '{}'", executable);
 }
 
+#[cfg(target_os = "linux")]
 fn validate_toolchain_input(toolchain_input: &str) -> Result<()> {
     let path = Path::new(toolchain_input);
     if !path.is_absolute() {
@@ -1764,6 +2352,7 @@ fn validate_toolchain_input(toolchain_input: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn normalized_toolchain_inputs(values: &[String]) -> Vec<(PathBuf, String)> {
     let mut output = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1776,6 +2365,7 @@ fn normalized_toolchain_inputs(values: &[String]) -> Vec<(PathBuf, String)> {
     output
 }
 
+#[cfg(target_os = "linux")]
 fn build_toolchain_path(values: &[String]) -> String {
     let mut directories = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1793,14 +2383,15 @@ fn build_toolchain_path(values: &[String]) -> String {
             directories.push(candidate_string);
         }
     }
-    directories.join(":")
+    join_host_path_list(&directories)
 }
 
+#[cfg(target_os = "linux")]
 fn prepend_path_entries(prefix: &str, fallback: &str) -> String {
     if prefix.is_empty() {
         fallback.to_string()
     } else {
-        format!("{prefix}:{fallback}")
+        format!("{}{}{}", prefix, host_path_separator(), fallback)
     }
 }
 
@@ -2757,6 +3348,9 @@ fn copy_symlink(
     log: &mut String,
 ) -> Result<()> {
     let target = validate_confined_symlink_target(source, source_root)?;
+    let target_is_dir = fs::metadata(source)
+        .with_context(|| format!("failed to inspect symlink target {}", source.display()))?
+        .is_dir();
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -2768,13 +3362,37 @@ fn copy_symlink(
         destination.display(),
         target.display()
     ));
-    symlink(&target, destination).with_context(|| {
-        format!(
-            "failed to create symlink {} -> {}",
-            destination.display(),
-            target.display()
-        )
-    })?;
+    create_host_symlink(&target, destination, target_is_dir)?;
+    Ok(())
+}
+
+fn create_host_symlink(target: &Path, destination: &Path, target_is_dir: bool) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = target_is_dir;
+        std::os::unix::fs::symlink(target, destination).with_context(|| {
+            format!(
+                "failed to create symlink {} -> {}",
+                destination.display(),
+                target.display()
+            )
+        })?;
+    }
+    #[cfg(windows)]
+    {
+        let result = if target_is_dir {
+            std::os::windows::fs::symlink_dir(target, destination)
+        } else {
+            std::os::windows::fs::symlink_file(target, destination)
+        };
+        result.with_context(|| {
+            format!(
+                "failed to create symlink {} -> {}",
+                destination.display(),
+                target.display()
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -2884,18 +3502,7 @@ where
                 .unwrap_or_default()
         )
     })?;
-    if !output.stdout.is_empty() {
-        log.push_str(&String::from_utf8_lossy(&output.stdout));
-        if !log.ends_with('\n') {
-            log.push('\n');
-        }
-    }
-    if !output.stderr.is_empty() {
-        log.push_str(&String::from_utf8_lossy(&output.stderr));
-        if !log.ends_with('\n') {
-            log.push('\n');
-        }
-    }
+    append_process_output(log, &output.stdout, &output.stderr);
     if !output.status.success() {
         bail!(
             "command '{}' failed with status {}",
@@ -2907,18 +3514,50 @@ where
 }
 
 fn resolve_command_path(executable: &str) -> PathBuf {
-    if executable.contains('/') {
+    if executable.contains('/') || executable.contains('\\') {
         return PathBuf::from(executable);
     }
-    let usr_bin = Path::new("/usr/bin").join(executable);
-    if usr_bin.exists() {
-        return usr_bin;
-    }
-    let bin = Path::new("/bin").join(executable);
-    if bin.exists() {
-        return bin;
+    if let Some(resolved) = find_executable_in_path(executable) {
+        return resolved;
     }
     PathBuf::from(executable)
+}
+
+fn find_executable_in_path(executable: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    let mut windows_extensions = Vec::new();
+    if cfg!(windows) && Path::new(executable).extension().is_none() {
+        windows_extensions = std::env::var_os("PATHEXT")
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    ".COM".to_string(),
+                    ".EXE".to_string(),
+                    ".BAT".to_string(),
+                    ".CMD".to_string(),
+                ]
+            });
+    }
+    for directory in std::env::split_paths(&path_var) {
+        let direct = directory.join(executable);
+        if direct.exists() {
+            return Some(direct);
+        }
+        for extension in &windows_extensions {
+            let candidate = directory.join(format!("{executable}{extension}"));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn package_exports_present(spec: &PackageSpec, store_root: &Path) -> Result<bool> {
