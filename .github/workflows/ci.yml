@@ -75,9 +75,9 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo cmake --fresh -S . -B build/ci-linux -DBUILD_TESTING=ON
-          sudo cmake --build build/ci-linux --parallel
-          sudo ctest --test-dir build/ci-linux --output-on-failure --no-tests=error --parallel
+          sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME cmake --fresh -S . -B build/ci-linux -DBUILD_TESTING=ON
+          sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME cmake --build build/ci-linux --parallel
+          sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME ctest --test-dir build/ci-linux --output-on-failure --no-tests=error --parallel
 
       - name: Repo CMake smoke (macOS)
         if: runner.os == 'macOS'
@@ -92,5 +92,5 @@ jobs:
         shell: pwsh
         run: |
           cmake --fresh -S . -B build/ci-windows -DBUILD_TESTING=ON
-          cmake --build build/ci-windows --parallel
-          ctest --test-dir build/ci-windows --output-on-failure --no-tests=error --parallel
+          cmake --build build/ci-windows --config Debug --parallel
+          ctest --test-dir build/ci-windows -C Debug --output-on-failure --no-tests=error --parallel
