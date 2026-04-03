@@ -1129,7 +1129,7 @@ fn wsl_distro_for_test() -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    String::from_utf8_lossy(&output.stdout)
+    decode_windows_command_output(&output.stdout)
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -1164,12 +1164,37 @@ fn installed_wsl_distros_for_test() -> Vec<String> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    String::from_utf8_lossy(&output.stdout)
+    decode_windows_command_output(&output.stdout)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn decode_windows_command_output(bytes: &[u8]) -> String {
+    if bytes.contains(&0) {
+        let mut code_units = Vec::with_capacity(bytes.len().div_ceil(2));
+        for chunk in bytes.chunks(2) {
+            let low = chunk[0];
+            let high = *chunk.get(1).unwrap_or(&0);
+            code_units.push(u16::from_le_bytes([low, high]));
+        }
+        String::from_utf16_lossy(&code_units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn decodes_utf16le_windows_command_output() {
+    let bytes = "Ubuntu-24.04\r\n"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(decode_windows_command_output(&bytes), "Ubuntu-24.04\r\n");
 }
 
 #[cfg(target_os = "windows")]

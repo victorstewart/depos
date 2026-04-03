@@ -831,10 +831,25 @@ fn installed_wsl_distros() -> Result<Vec<String>> {
             output.status
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
+    Ok(decode_windows_command_output(&output.stdout)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
         .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn decode_windows_command_output(bytes: &[u8]) -> String {
+    if bytes.contains(&0) {
+        let mut code_units = Vec::with_capacity(bytes.len().div_ceil(2));
+        for chunk in bytes.chunks(2) {
+            let low = chunk[0];
+            let high = *chunk.get(1).unwrap_or(&0);
+            code_units.push(u16::from_le_bytes([low, high]));
+        }
+        String::from_utf16_lossy(&code_units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
