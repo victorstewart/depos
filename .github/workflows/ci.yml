@@ -159,7 +159,7 @@ jobs:
       - name: Cargo package
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" package --allow-dirty --locked --no-verify --manifest-path cli/Cargo.toml
+        run: sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" package --allow-dirty --locked --manifest-path cli/Cargo.toml
 
       - name: Check generated depofiles
         if: runner.os == 'Linux'
