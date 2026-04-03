@@ -52,7 +52,17 @@ jobs:
       - name: Rust tests (Linux)
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" test --locked --manifest-path cli/Cargo.toml -j"$(nproc)"
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          if ! sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" test --locked --manifest-path cli/Cargo.toml -j"$(nproc)" 2>&1 | tee "$log"; then
+            echo "::error::Linux cargo test failed; recent output follows"
+            tail -n 200 "$log"
+            grep -E 'test .*FAILED|failures:|panicked at|error:' "$log" | tail -n 20 | while IFS= read -r line; do
+              printf '::error::%s\n' "$line"
+            done
+            exit 1
+          fi
 
       - name: Rust tests (macOS)
         if: runner.os == 'macOS'
@@ -65,7 +75,22 @@ jobs:
         env:
           DEPOS_TEST_LINUX_PROVIDER: "1"
           DEPOS_SOURCE_REPO: ${{ github.workspace }}
-        run: cargo test --locked --manifest-path cli/Cargo.toml -j $env:NUMBER_OF_PROCESSORS
+        run: |
+          $log = Join-Path $env:TEMP "depos-windows-rust-tests.log"
+          & cargo test --locked --manifest-path cli/Cargo.toml -j $env:NUMBER_OF_PROCESSORS 2>&1 | Tee-Object -FilePath $log
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            Write-Host "::error::Windows cargo test failed; recent output follows"
+            Get-Content $log -Tail 200 | ForEach-Object { Write-Host $_ }
+            Get-Content $log |
+              Select-String -Pattern 'test .*FAILED|failures:|panicked at|error:' |
+              Select-Object -Last 20 |
+              ForEach-Object {
+                $line = $_.ToString().Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                Write-Host "::error::$line"
+              }
+            exit $exitCode
+          }
 
       - name: Cargo fmt
         if: runner.os == 'Linux'
