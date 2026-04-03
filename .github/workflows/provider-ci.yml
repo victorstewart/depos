@@ -3,8 +3,6 @@ name: provider-ci
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
     paths:
       - .github/workflows/provider-ci.yml
       - cli/Cargo.toml
