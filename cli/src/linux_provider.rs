@@ -43,6 +43,9 @@ struct ProviderJob {
     store_root: String,
 }
 
+const PROVIDER_RUNTIME_LAYOUT_VERSION: &str = "v1";
+const PROVIDER_BOOTSTRAP_VERSION: &str = "v1";
+
 pub(crate) fn execute_linux_provider_command_pipeline(
     depos_root: &Path,
     store_root: &Path,
@@ -133,7 +136,8 @@ fn remote_store_root(variant_root: &str, spec: &PackageSpec) -> String {
 impl LinuxProvider {
     fn detect() -> Result<Self> {
         let runtime_hash = runtime_hash_string(&provider_source_repo()?);
-        let runtime_root = format!("/var/tmp/depos-provider/{runtime_hash}");
+        let runtime_root =
+            format!("/var/tmp/depos-provider/{PROVIDER_RUNTIME_LAYOUT_VERSION}/{runtime_hash}");
         let cache_root = format!("{runtime_root}/toolchain-cache");
         let repo_parent = format!("{runtime_root}/repo-source");
         let source_root = provider_source_repo()?;
@@ -227,7 +231,10 @@ impl LinuxProvider {
         )?;
         self.run_shell(&format!("rm -rf {}", shell_quote(&self.repo_root)), log)?;
         self.push_path(repo_root, &self.repo_parent, log)?;
-        self.run_shell(&bootstrap_script(&self.repo_root, &self.target_root), log)
+        self.run_shell(
+            &bootstrap_script(&self.runtime_root, &self.repo_root, &self.target_root),
+            log,
+        )
     }
 
     fn run_materialize(
@@ -560,7 +567,7 @@ fn pipe_commands(
     Ok(())
 }
 
-fn bootstrap_script(repo_root: &str, target_root: &str) -> String {
+fn bootstrap_script(runtime_root: &str, repo_root: &str, target_root: &str) -> String {
     format!(
         r#"
 set -eu
@@ -569,21 +576,22 @@ if [ "$(id -u)" -ne 0 ]; then
   SUDO=sudo
 fi
 $SUDO mkdir -p {runtime_root}
-$SUDO apt-get update
-$SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential clang cmake curl git pkg-config tar umoci skopeo qemu-user-static ca-certificates
+BOOTSTRAP_STAMP={bootstrap_stamp}
+if [ ! -f "$BOOTSTRAP_STAMP" ]; then
+  $SUDO apt-get update
+  $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential clang cmake curl git pkg-config tar umoci skopeo qemu-user-static ca-certificates
+  $SUDO touch "$BOOTSTRAP_STAMP"
+fi
 if ! command -v cargo >/dev/null 2>&1; then
   curl --fail --location --silent --show-error https://sh.rustup.rs | sh -s -- -y --profile minimal
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --release --locked --manifest-path {manifest} --target-dir {target}
 "#,
-        runtime_root = shell_quote(
-            Path::new(target_root)
-                .parent()
-                .unwrap_or_else(|| Path::new("/var/tmp"))
-                .to_str()
-                .unwrap_or("/var/tmp")
-        ),
+        runtime_root = shell_quote(runtime_root),
+        bootstrap_stamp = shell_quote(&format!(
+            "{runtime_root}/bootstrap-{PROVIDER_BOOTSTRAP_VERSION}.stamp"
+        )),
         manifest = shell_quote(&format!("{repo_root}/cli/Cargo.toml")),
         target = shell_quote(target_root),
     )
