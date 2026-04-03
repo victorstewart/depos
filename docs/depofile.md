@@ -83,6 +83,7 @@ Provider selection stays in runtime configuration rather than the recipe:
 - `DEPOS_LINUX_PROVIDER=auto`
 - `DEPOS_LINUX_PROVIDER=wsl2`
 - `DEPOS_LINUX_PROVIDER=mac-local`
+- `DEPOS_LINUX_PROVIDER_ROOT=/absolute/linux/path`
 
 `DepoFile`s are trusted inputs. `depos` is not a hostile-code sandbox.
 

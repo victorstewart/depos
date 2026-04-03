@@ -143,12 +143,11 @@ fn remote_store_root(variant_root: &str, spec: &PackageSpec) -> String {
 impl LinuxProvider {
     fn detect() -> Result<Self> {
         let selection = configured_provider_selection()?;
-        let runtime_hash = runtime_hash_string(&provider_source_repo()?);
-        let runtime_root =
-            format!("/var/tmp/depos-provider/{PROVIDER_RUNTIME_LAYOUT_VERSION}/{runtime_hash}");
+        let source_repo = provider_source_repo()?;
+        let runtime_root = configured_provider_runtime_root(&source_repo)?;
         let cache_root = format!("{runtime_root}/toolchain-cache");
         let repo_parent = format!("{runtime_root}/repo-source");
-        let source_root = provider_source_repo()?;
+        let source_root = source_repo;
         let repo_root = format!("{repo_parent}/{}", file_name_string(&source_root)?);
         let target_root = format!("{runtime_root}/cargo-target");
         let binary_path = format!("{target_root}/release/depos");
@@ -651,6 +650,33 @@ fn validate_source_repo(path: &Path) -> Result<()> {
 fn runtime_hash_string(path: &Path) -> String {
     let digest = Sha256::digest(path.display().to_string().as_bytes());
     format!("{:x}", digest)[..16].to_string()
+}
+
+fn configured_provider_runtime_root(source_repo: &Path) -> Result<String> {
+    if let Some(raw) = std::env::var_os("DEPOS_LINUX_PROVIDER_ROOT") {
+        let raw = raw.to_string_lossy();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            bail!("DEPOS_LINUX_PROVIDER_ROOT must be an absolute Linux path, got an empty value");
+        }
+        if !trimmed.starts_with('/') {
+            bail!(
+                "DEPOS_LINUX_PROVIDER_ROOT must be an absolute Linux path, got {:?}",
+                trimmed
+            );
+        }
+        let normalized = if trimmed == "/" {
+            "/".to_string()
+        } else {
+            trimmed.trim_end_matches('/').to_string()
+        };
+        return Ok(normalized);
+    }
+
+    let runtime_hash = runtime_hash_string(source_repo);
+    Ok(format!(
+        "/var/tmp/depos-provider/{PROVIDER_RUNTIME_LAYOUT_VERSION}/{runtime_hash}"
+    ))
 }
 
 fn configured_provider_selection() -> Result<ProviderSelection> {

@@ -450,6 +450,34 @@ fn sync_reports_invalid_linux_provider_selection_for_oci_requests() {
     assert_error_contains(&error, "auto, wsl2, mac-local");
 }
 
+#[test]
+fn sync_reports_invalid_linux_provider_root_for_oci_requests() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.create_source_archive(
+        "upstreams/invalid_provider_root_demo",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+    let error = with_env_vars(
+        &[("DEPOS_LINUX_PROVIDER_ROOT", Some("relative-root"))],
+        || {
+            sync_with_depofile(
+                &sandbox,
+                "invalid_provider_root_demo",
+                &provider_header_depofile(
+                    "invalid_provider_root_demo",
+                    &portable_file_url(&archive),
+                ),
+            )
+        },
+    )
+    .expect_err("invalid provider root should be rejected");
+    assert_error_contains(
+        &error,
+        "DEPOS_LINUX_PROVIDER_ROOT must be an absolute Linux path",
+    );
+    assert_error_contains(&error, "relative-root");
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn sync_rejects_mac_local_provider_selection_on_windows() {
