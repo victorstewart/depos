@@ -42,6 +42,15 @@ On macOS and Windows, `depos` still explicitly rejects:
 - Windows: WSL2
 - macOS: a direct Apple Virtualization helper and Linux guest
 
+Runtime selection is explicit at the bootstrap layer, not in `DepoFile` syntax:
+
+- `DEPOS_LINUX_PROVIDER=auto` selects the host-appropriate provider
+- `DEPOS_LINUX_PROVIDER=wsl2` forces the Windows WSL2 path
+- `DEPOS_LINUX_PROVIDER=mac-local` forces the macOS Apple-Virtualization-backed path
+- `DEPOS_WSL_DISTRO=<name>` selects the WSL distro when using `wsl2`
+- `DEPOS_APPLE_VIRTUALIZATION_HELPER=/absolute/path/to/helper` points `depos` at the direct macOS helper
+- `DEPOS_APPLE_VIRTUALIZATION_VM=<name>` overrides the default macOS VM name
+
 ## Docs
 
 - [Landing page](../README.md)

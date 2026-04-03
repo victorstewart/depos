@@ -4,10 +4,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use depos::{host_arch, sync_registry, SyncOptions};
+use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tar::Builder;
 use tempfile::TempDir;
 
@@ -366,6 +368,103 @@ fn sync_reports_missing_direct_apple_virtualization_helper_for_oci_requests() {
 }
 
 #[test]
+fn sync_reports_invalid_linux_provider_selection_for_oci_requests() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.create_source_archive(
+        "upstreams/invalid_provider_selection_demo",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+    let error = with_env_vars(&[("DEPOS_LINUX_PROVIDER", Some("bogus"))], || {
+        sync_with_depofile(
+            &sandbox,
+            "invalid_provider_selection_demo",
+            &provider_header_depofile(
+                "invalid_provider_selection_demo",
+                &portable_file_url(&archive),
+            ),
+        )
+    })
+    .expect_err("invalid provider selection should be rejected");
+    assert_error_contains(&error, "unsupported DEPOS_LINUX_PROVIDER");
+    assert_error_contains(&error, "auto, wsl2, mac-local");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn sync_rejects_mac_local_provider_selection_on_windows() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.create_source_archive(
+        "upstreams/windows_wrong_provider_demo",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+    let error = with_env_vars(&[("DEPOS_LINUX_PROVIDER", Some("mac-local"))], || {
+        sync_with_depofile(
+            &sandbox,
+            "windows_wrong_provider_demo",
+            &provider_header_depofile("windows_wrong_provider_demo", &portable_file_url(&archive)),
+        )
+    })
+    .expect_err("mac-local provider selection should be rejected on Windows");
+    assert_error_contains(
+        &error,
+        "DEPOS_LINUX_PROVIDER=mac-local is not supported on Windows",
+    );
+    assert_error_contains(&error, "use auto or wsl2");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn sync_reports_missing_explicit_wsl_distro_for_oci_requests() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.create_source_archive(
+        "upstreams/windows_missing_distro_demo",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+    let error = with_env_vars(
+        &[
+            ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
+            ("DEPOS_WSL_DISTRO", Some("depos-does-not-exist")),
+        ],
+        || {
+            sync_with_depofile(
+                &sandbox,
+                "windows_missing_distro_demo",
+                &provider_header_depofile(
+                    "windows_missing_distro_demo",
+                    &portable_file_url(&archive),
+                ),
+            )
+        },
+    )
+    .expect_err("missing explicit WSL distro should be reported clearly");
+    assert_error_contains(&error, "depos-does-not-exist");
+    assert_error_contains(&error, "install/configure WSL");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sync_rejects_wsl2_provider_selection_on_macos() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.create_source_archive(
+        "upstreams/macos_wrong_provider_demo",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+    let error = with_env_vars(&[("DEPOS_LINUX_PROVIDER", Some("wsl2"))], || {
+        sync_with_depofile(
+            &sandbox,
+            "macos_wrong_provider_demo",
+            &provider_header_depofile("macos_wrong_provider_demo", &portable_file_url(&archive)),
+        )
+    })
+    .expect_err("wsl2 provider selection should be rejected on macOS");
+    assert_error_contains(
+        &error,
+        "DEPOS_LINUX_PROVIDER=wsl2 is not supported on macOS",
+    );
+    assert_error_contains(&error, "use auto or mac-local");
+}
+
+#[test]
 fn sync_builds_cross_target_linux_oci_package_with_provider_when_enabled() {
     if !linux_provider_tests_enabled() {
         return;
@@ -520,16 +619,29 @@ fn linux_provider_tests_enabled() -> bool {
     )
 }
 
+fn provider_header_depofile(package_name: &str, source_url: &str) -> String {
+    format!(
+        "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {source_url}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/demo.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n"
+    )
+}
+
 struct Sandbox {
     root: TempDir,
+    _guard: MutexGuard<'static, ()>,
 }
 
 impl Sandbox {
     fn new() -> Self {
+        let guard = portable_test_lock()
+            .lock()
+            .expect("portable integration test lock");
         let root = tempfile::tempdir().expect("temporary directory");
         fs::create_dir_all(root.path().join("depofiles")).expect("create depofiles root");
         fs::create_dir_all(root.path().join(".run")).expect("create runtime root");
-        Self { root }
+        Self {
+            root,
+            _guard: guard,
+        }
     }
 
     fn depos_root(&self) -> PathBuf {
@@ -642,4 +754,45 @@ fn run_test_command<const N: usize>(current_dir: &Path, executable: &str, args: 
         executable,
         args
     );
+}
+
+fn portable_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_env_vars<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+    let _guard = TestEnvGuard::new(vars);
+    f()
+}
+
+struct TestEnvGuard {
+    saved: Vec<(String, Option<OsString>)>,
+}
+
+impl TestEnvGuard {
+    fn new(vars: &[(&str, Option<&str>)]) -> Self {
+        let saved = vars
+            .iter()
+            .map(|(name, _)| ((*name).to_string(), std::env::var_os(name)))
+            .collect::<Vec<_>>();
+        for (name, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        for (name, value) in &self.saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
 }

@@ -78,6 +78,12 @@ On macOS and Windows, `depos` keeps native `BUILD_ROOT SYSTEM` on the portable h
 - `TOOLCHAIN ROOTFS` without `BUILD_ROOT OCI`
 - `BUILD_ARCH != TARGET_ARCH` without `BUILD_ROOT OCI`
 
+Provider selection stays in runtime configuration rather than the recipe:
+
+- `DEPOS_LINUX_PROVIDER=auto`
+- `DEPOS_LINUX_PROVIDER=wsl2`
+- `DEPOS_LINUX_PROVIDER=mac-local`
+
 `DepoFile`s are trusted inputs. `depos` is not a hostile-code sandbox.
 
 ## Real Examples In This Repo

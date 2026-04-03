@@ -56,6 +56,19 @@ That root holds:
 - materialized package outputs
 - generated CMake registries
 
+## Linux Provider Runtime Knobs
+
+On macOS and Windows, `BUILD_ROOT OCI <image>` enters the local Linux-provider path. Runtime selection stays outside the `DepoFile` surface:
+
+- `DEPOS_LINUX_PROVIDER=auto` selects the host-appropriate provider
+- `DEPOS_LINUX_PROVIDER=wsl2` forces the Windows WSL2 provider
+- `DEPOS_LINUX_PROVIDER=mac-local` forces the macOS direct-helper path
+- `DEPOS_WSL_DISTRO=<name>` selects the WSL distro when `wsl2` is active
+- `DEPOS_APPLE_VIRTUALIZATION_HELPER=/absolute/path/to/helper` points macOS at the direct helper executable
+- `DEPOS_APPLE_VIRTUALIZATION_VM=<name>` overrides the default macOS VM name
+
+On macOS and Windows, `depos` still rejects Linux-only advanced requests without `BUILD_ROOT OCI <image>`.
+
 ## Resolution Order In CMake
 
 When `.depos.cmake` resolves the tool, the order is:

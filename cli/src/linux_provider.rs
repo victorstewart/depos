@@ -24,6 +24,13 @@ enum ProviderKind {
     AppleVirtualization { helper: PathBuf, vm_name: String },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderSelection {
+    Auto,
+    Wsl2,
+    MacLocal,
+}
+
 #[derive(Clone, Debug)]
 struct LinuxProvider {
     kind: ProviderKind,
@@ -135,6 +142,7 @@ fn remote_store_root(variant_root: &str, spec: &PackageSpec) -> String {
 
 impl LinuxProvider {
     fn detect() -> Result<Self> {
+        let selection = configured_provider_selection()?;
         let runtime_hash = runtime_hash_string(&provider_source_repo()?);
         let runtime_root =
             format!("/var/tmp/depos-provider/{PROVIDER_RUNTIME_LAYOUT_VERSION}/{runtime_hash}");
@@ -146,6 +154,11 @@ impl LinuxProvider {
         let binary_path = format!("{target_root}/release/depos");
         #[cfg(target_os = "windows")]
         {
+            if selection == ProviderSelection::MacLocal {
+                bail!(
+                    "DEPOS_LINUX_PROVIDER=mac-local is not supported on Windows; use auto or wsl2"
+                );
+            }
             let distro = detect_wsl_distro()?;
             return Ok(Self {
                 kind: ProviderKind::Wsl { distro },
@@ -159,6 +172,9 @@ impl LinuxProvider {
         }
         #[cfg(target_os = "macos")]
         {
+            if selection == ProviderSelection::Wsl2 {
+                bail!("DEPOS_LINUX_PROVIDER=wsl2 is not supported on macOS; use auto or mac-local");
+            }
             let helper = std::env::var_os("DEPOS_APPLE_VIRTUALIZATION_HELPER")
                 .map(PathBuf::from)
                 .ok_or_else(|| {
@@ -632,6 +648,22 @@ fn validate_source_repo(path: &Path) -> Result<()> {
 fn runtime_hash_string(path: &Path) -> String {
     let digest = Sha256::digest(path.display().to_string().as_bytes());
     format!("{:x}", digest)[..16].to_string()
+}
+
+fn configured_provider_selection() -> Result<ProviderSelection> {
+    let Some(raw) = std::env::var_os("DEPOS_LINUX_PROVIDER") else {
+        return Ok(ProviderSelection::Auto);
+    };
+    let raw = raw.to_string_lossy();
+    match raw.trim() {
+        "" | "auto" => Ok(ProviderSelection::Auto),
+        "wsl2" => Ok(ProviderSelection::Wsl2),
+        "mac-local" => Ok(ProviderSelection::MacLocal),
+        other => bail!(
+            "unsupported DEPOS_LINUX_PROVIDER value {:?}; expected one of: auto, wsl2, mac-local",
+            other
+        ),
+    }
 }
 
 fn file_name_string(path: &Path) -> Result<String> {
