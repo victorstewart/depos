@@ -56,17 +56,17 @@ The recommended export pattern is:
 - keep the source archive's `depofiles/` tree for the library's dependency recipes only
 
 That lets consumers download only the published `DepoFile`. `depos` fetches the source
-archive, discovers embedded dependency `DepoFile`s from the fetched source tree, and resolves
-the full graph in one flow.
+archive, discovers embedded dependency `DepoFile`s from the fetched source tree, cascades
+them automatically, and resolves the full graph in one flow.
 
 ## Bootstrap Behavior
 
-By default `.depos.cmake` bootstraps `depos 0.4.0` into a hidden top-level `.depos/` directory next to the helper. It keeps the local registry and bootstrap state there too.
+By default `.depos.cmake` bootstraps `depos 0.5.0` into a hidden top-level `.depos/` directory next to the helper. It keeps the local registry and bootstrap state there too.
 
 If you do not want local bootstrap, install `depos` yourself:
 
 ```bash
-cargo install depos --version 0.4.0
+cargo install depos --version 0.5.0
 ```
 
 Then point CMake at it with `DEPOS_EXECUTABLE`. If you want a shared root instead of the project-local `.depos/`, set `DEPOS_ROOT` too.

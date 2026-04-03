@@ -3962,7 +3962,7 @@ fn configure_cmake_capture_output(
 }
 
 fn create_fake_cargo_dir(sandbox: &Sandbox, relative: &str) -> PathBuf {
-    create_fake_cargo_dir_with_version(sandbox, relative, "0.4.0")
+    create_fake_cargo_dir_with_version(sandbox, relative, env!("CARGO_PKG_VERSION"))
 }
 
 fn create_fake_cargo_dir_with_version(sandbox: &Sandbox, relative: &str, version: &str) -> PathBuf {

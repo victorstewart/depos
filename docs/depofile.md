@@ -42,8 +42,9 @@ Keep that published `DepoFile` outside `depofiles/` and outside the source archi
 Inside the source archive, keep only the library's dependency recipes under `depofiles/`.
 
 When a consumer requests the published `DepoFile`, `depos` fetches the source, discovers the
-embedded dependency `DepoFile`s from that fetched source tree, and resolves the transparent
-`DEPENDS` entries in the same flow.
+embedded dependency `DepoFile`s from that fetched source tree, cascades them automatically,
+and resolves the transparent `DEPENDS` entries in the same flow. This detached published
+`DepoFile` is the intended way to present your library for `depos` consumption.
 
 ## Build Systems
 

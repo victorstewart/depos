@@ -95,14 +95,14 @@ depos_link(app cascade_lib)
 The intended published shape is one detached top-level `cascade_lib.DepoFile` outside the
 source archive. That published `DepoFile` points at the release tarball and lists transparent
 `DEPENDS`. The fetched source archive can then carry `depofiles/` for the library's own
-dependencies, which `depos` now discovers during the same resolution flow.
+dependencies, which `depos` now discovers and cascades during the same resolution flow.
 
 ## Project Defaults
 
 If you want repo-local defaults without hardcoding them in `CMakeLists.txt`, add `depos.project.cmake` next to `.depos.cmake`:
 
 ```cmake
-set(DEPOS_BOOTSTRAP_VERSION "0.4.0" CACHE STRING "Pinned depos version used by this project" FORCE)
+set(DEPOS_BOOTSTRAP_VERSION "0.5.0" CACHE STRING "Pinned depos version used by this project" FORCE)
 ```
 
 Useful knobs:

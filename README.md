@@ -26,12 +26,14 @@ depos_depend(itoa)
 depos_link(app itoa)
 ```
 
-`.depos.cmake` is the low-friction path. By default it bootstraps `depos 0.4.0` locally on first use.
+`.depos.cmake` is the low-friction path. By default it bootstraps `depos 0.5.0` locally on first use.
 
 If you publish a library for others to consume through `depos`, ship one detached top-level
 published `DepoFile` outside your source archive. That published `DepoFile` should point at
-the release source tarball, list transparent `DEPENDS`, and let `depos` discover the
-dependency `depofiles/` tree from inside the fetched source during the same resolution flow.
+the release source tarball, list transparent `DEPENDS`, and let `depos` automatically cascade
+the dependency `depofiles/` tree from inside the fetched source during the same resolution flow.
+That detached published `DepoFile` is the correct library export surface for `depos`
+consumption.
 
 Why this exists: stop letting `/usr`, `/lib`, `/usr/local`, or some random SDK decide whether your dependency graph works.
 
