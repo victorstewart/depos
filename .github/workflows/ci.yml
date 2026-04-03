@@ -57,7 +57,20 @@ jobs:
           log="$(mktemp)"
           if ! sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" test --locked --manifest-path cli/Cargo.toml -j"$(nproc)" 2>&1 | tee "$log"; then
             echo "::error::Linux cargo test failed; recent output follows"
-            tail -n 200 "$log"
+            mapfile -t tail_lines < <(tail -n 60 "$log")
+            printf '%s\n' "${tail_lines[@]}"
+            chunk_size=20
+            for ((start=0; start<${#tail_lines[@]}; start+=chunk_size)); do
+              end=$((start + chunk_size))
+              if (( end > ${#tail_lines[@]} )); then
+                end=${#tail_lines[@]}
+              fi
+              block=$(printf '%s \\n ' "${tail_lines[@]:start:end-start}")
+              block=${block//'%'/'%25'}
+              block=${block//$'\r'/'%0D'}
+              block=${block//$'\n'/'%0A'}
+              printf '::error::Linux cargo test tail [%d-%d]: %s\n' "$((start + 1))" "$end" "$block"
+            done
             grep -E 'test .*FAILED|failures:|panicked at|error:' "$log" | tail -n 20 | while IFS= read -r line; do
               printf '::error::%s\n' "$line"
             done
