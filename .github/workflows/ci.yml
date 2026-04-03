@@ -81,14 +81,22 @@ jobs:
           $exitCode = $LASTEXITCODE
           if ($exitCode -ne 0) {
             Write-Host "::error::Windows cargo test failed; recent output follows"
-            Get-Content $log -Tail 200 | ForEach-Object { Write-Host $_ }
+            $tail = Get-Content $log -Tail 60
+            $tail | ForEach-Object { Write-Host $_ }
+            $chunkSize = 20
+            for ($start = 0; $start -lt $tail.Count; $start += $chunkSize) {
+              $end = [Math]::Min($start + $chunkSize - 1, $tail.Count - 1)
+              $block = [string]::Join(' \n ', $tail[$start..$end])
+              $escaped = $block.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Host "::error::Windows cargo test tail [$($start + 1)-$($end + 1)]: $escaped"
+            }
             $lines = Get-Content $log
             $seen = [System.Collections.Generic.HashSet[string]]::new()
             for ($i = 0; $i -lt $lines.Count; $i++) {
-              if ($lines[$i] -notmatch 'test .*FAILED|failures:|panicked at|error:') {
+              if ($lines[$i] -notmatch 'panicked at|materialization log tail|caused by:|provider shell command failed|error:') {
                 continue
               }
-              $end = [Math]::Min($i + 4, $lines.Count - 1)
+              $end = [Math]::Min($i + 7, $lines.Count - 1)
               $window = $lines[$i..$end]
               $block = [string]::Join(' \n ', $window)
               if (-not $seen.Add($block)) {
