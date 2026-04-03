@@ -58,9 +58,25 @@ jobs:
           if ! sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" test --locked --manifest-path cli/Cargo.toml -j"$(nproc)" 2>&1 | tee "$log"; then
             echo "::error::Linux cargo test failed; recent output follows"
             tail -n 200 "$log"
-            grep -E 'test .*FAILED|failures:|panicked at|error:' "$log" | tail -n 20 | while IFS= read -r line; do
-              printf '::error::%s\n' "$line"
-            done
+            python - "$log" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+log_path = Path(sys.argv[1])
+lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+pattern = re.compile(r"test .*FAILED|failures:|panicked at|error:")
+seen = set()
+for index, line in enumerate(lines):
+    if not pattern.search(line):
+        continue
+    window = tuple(lines[index : index + 5])
+    if window in seen:
+        continue
+    seen.add(window)
+    block = " \\n ".join(window).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::error::{block}")
+PY
             exit 1
           fi
 
@@ -82,13 +98,21 @@ jobs:
           if ($exitCode -ne 0) {
             Write-Host "::error::Windows cargo test failed; recent output follows"
             Get-Content $log -Tail 200 | ForEach-Object { Write-Host $_ }
-            Get-Content $log |
-              Select-String -Pattern 'test .*FAILED|failures:|panicked at|error:' |
-              Select-Object -Last 20 |
-              ForEach-Object {
-                $line = $_.ToString().Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-                Write-Host "::error::$line"
+            $lines = Get-Content $log
+            $seen = [System.Collections.Generic.HashSet[string]]::new()
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -notmatch 'test .*FAILED|failures:|panicked at|error:') {
+                continue
               }
+              $end = [Math]::Min($i + 4, $lines.Count - 1)
+              $window = $lines[$i..$end]
+              $block = [string]::Join(' \n ', $window)
+              if (-not $seen.Add($block)) {
+                continue
+              }
+              $escaped = $block.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Host "::error::$escaped"
+            }
             exit $exitCode
           }
 
