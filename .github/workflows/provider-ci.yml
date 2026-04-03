@@ -1,0 +1,114 @@
+name: provider-ci
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/provider-ci.yml
+      - cli/Cargo.toml
+      - Cargo.lock
+      - cli/src/lib.rs
+      - cli/src/linux_provider.rs
+      - cli/tests/portable_integration.rs
+  pull_request:
+    paths:
+      - .github/workflows/provider-ci.yml
+      - cli/Cargo.toml
+      - Cargo.lock
+      - cli/src/lib.rs
+      - cli/src/linux_provider.rs
+      - cli/tests/portable_integration.rs
+
+concurrency:
+  group: provider-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-provider:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up WSL
+        uses: Vampire/setup-wsl@v6
+        with:
+          distribution: Ubuntu-24.04
+          set-as-default: true
+          use-cache: false
+
+      - name: Windows provider tests
+        shell: pwsh
+        env:
+          DEPOS_TEST_LINUX_PROVIDER: "1"
+          DEPOS_SOURCE_REPO: ${{ github.workspace }}
+        # This lane is intentionally separate because hosted Windows always pays the cold WSL/provider setup cost.
+        run: |
+          $log = Join-Path $env:TEMP "depos-windows-provider-tests.log"
+          if (Test-Path $log) {
+            Remove-Item $log -Force
+          }
+          $manifest = (Resolve-Path "cli/Cargo.toml").Path.Replace("'", "''")
+          $workspace = (Resolve-Path ".").Path
+          $escapedLog = $log.Replace("'", "''")
+          $command = "& cargo test --locked --manifest-path '$manifest' --test portable_integration -j $env:NUMBER_OF_PROCESSORS 2>&1 | Tee-Object -FilePath '$escapedLog'; exit `$LASTEXITCODE"
+          $proc = Start-Process -FilePath "pwsh" -ArgumentList @("-NoLogo", "-NoProfile", "-Command", $command) -WorkingDirectory $workspace -PassThru
+          $deadline = (Get-Date).AddMinutes(25)
+          $exitCode = $null
+          $lastTail = ""
+          while (-not $proc.HasExited) {
+            Start-Sleep -Seconds 30
+            $proc.Refresh()
+            if (Test-Path $log) {
+              $currentTail = ((Get-Content $log -Tail 20) -join "`n")
+              if ($currentTail -and $currentTail -ne $lastTail) {
+                Write-Host "::notice::Windows provider test heartbeat"
+                Get-Content $log -Tail 20 | ForEach-Object { Write-Host $_ }
+                $lastTail = $currentTail
+              }
+            }
+            if ((Get-Date) -ge $deadline) {
+              Stop-Process -Id $proc.Id -Force
+              $exitCode = 124
+              Write-Host "::error::Windows provider tests exceeded 25 minutes and were terminated"
+              break
+            }
+          }
+          if ($null -eq $exitCode) {
+            $exitCode = $proc.ExitCode
+          }
+          if ($exitCode -ne 0) {
+            Write-Host "::error::Windows provider tests failed; recent output follows"
+            $tail = if (Test-Path $log) { Get-Content $log -Tail 60 } else { @() }
+            $tail | ForEach-Object { Write-Host $_ }
+            $chunkSize = 20
+            for ($start = 0; $start -lt $tail.Count; $start += $chunkSize) {
+              $end = [Math]::Min($start + $chunkSize - 1, $tail.Count - 1)
+              $block = [string]::Join(' \n ', $tail[$start..$end])
+              $escaped = $block.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Host "::error::Windows provider test tail [$($start + 1)-$($end + 1)]: $escaped"
+            }
+            $lines = if (Test-Path $log) { Get-Content $log } else { @() }
+            $seen = [System.Collections.Generic.HashSet[string]]::new()
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -notmatch 'panicked at|materialization log tail|caused by:|provider shell command failed|error:') {
+                continue
+              }
+              $end = [Math]::Min($i + 7, $lines.Count - 1)
+              $window = $lines[$i..$end]
+              $block = [string]::Join(' \n ', $window)
+              if (-not $seen.Add($block)) {
+                continue
+              }
+              $escaped = $block.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Host "::error::$escaped"
+            }
+            exit $exitCode
+          }
