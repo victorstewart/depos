@@ -576,11 +576,10 @@ if [ "$(id -u)" -ne 0 ]; then
   SUDO=sudo
 fi
 $SUDO mkdir -p {runtime_root}
-BOOTSTRAP_STAMP={bootstrap_stamp}
-if [ ! -f "$BOOTSTRAP_STAMP" ]; then
+if [ ! -f {bootstrap_stamp} ]; then
   $SUDO apt-get update
   $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential clang cmake curl git pkg-config tar umoci skopeo qemu-user-static ca-certificates
-  $SUDO touch "$BOOTSTRAP_STAMP"
+  $SUDO touch {bootstrap_stamp}
 fi
 if ! command -v cargo >/dev/null 2>&1; then
   curl --fail --location --silent --show-error https://sh.rustup.rs | sh -s -- -y --profile minimal
