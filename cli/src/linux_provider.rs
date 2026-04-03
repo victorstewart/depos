@@ -51,6 +51,11 @@ struct ProviderJob {
     store_root: String,
 }
 
+struct ProviderSourceBundle {
+    local_root: PathBuf,
+    fingerprint: String,
+}
+
 const PROVIDER_RUNTIME_LAYOUT_VERSION: &str = "v1";
 const PROVIDER_BOOTSTRAP_VERSION: &str = "v1";
 #[cfg(target_os = "windows")]
@@ -254,10 +259,36 @@ impl LinuxProvider {
             log,
         )?;
         self.write_metadata(log)?;
-        self.run_shell(&format!("rm -rf {}", shell_quote(&self.repo_root)), log)?;
-        self.push_path(repo_root, &self.repo_parent, log)?;
+        let source_bundle = prepare_provider_source_bundle(repo_root)?;
+        let repo_sync_stamp = format!(
+            "{}/repo-sync-{}.stamp",
+            self.runtime_root, source_bundle.fingerprint
+        );
+        if self.remote_path_exists(&repo_sync_stamp, log)?
+            && self.remote_path_exists(&self.repo_root, log)?
+        {
+            log.push_str("provider source sync: warm\n");
+        } else {
+            log.push_str("provider source sync: cold\n");
+            self.run_shell(
+                &format!(
+                    "rm -rf {repo_root} {stamp}",
+                    repo_root = shell_quote(&self.repo_root),
+                    stamp = shell_quote(&repo_sync_stamp),
+                ),
+                log,
+            )?;
+            self.push_path(&source_bundle.local_root, &self.repo_parent, log)?;
+            self.run_shell(&format!("touch {}", shell_quote(&repo_sync_stamp)), log)?;
+        }
         self.run_shell(
-            &bootstrap_script(&self.runtime_root, &self.repo_root, &self.target_root),
+            &bootstrap_script(
+                &self.runtime_root,
+                &self.repo_root,
+                &self.target_root,
+                &self.binary_path,
+                &source_bundle.fingerprint,
+            ),
             log,
         )
     }
@@ -373,11 +404,7 @@ impl LinuxProvider {
     }
 
     fn run_shell(&self, script: &str, log: &mut String) -> Result<()> {
-        let output = self
-            .spawn_shell(script)?
-            .output()
-            .context("failed to spawn provider shell")?;
-        append_process_output(log, &output.stdout, &output.stderr);
+        let output = self.run_shell_capture(script, log)?;
         if !output.status.success() {
             let mut message = format!(
                 "provider shell command failed with status {}",
@@ -388,6 +415,36 @@ impl LinuxProvider {
             bail!("{message}");
         }
         Ok(())
+    }
+
+    fn run_shell_capture(&self, script: &str, log: &mut String) -> Result<Output> {
+        let output = self
+            .spawn_shell(script)?
+            .output()
+            .context("failed to spawn provider shell")?;
+        append_process_output(log, &output.stdout, &output.stderr);
+        Ok(output)
+    }
+
+    fn remote_path_exists(&self, path: &str, _log: &mut String) -> Result<bool> {
+        let script = format!(
+            "if [ -e {path} ]; then printf 1; else printf 0; fi",
+            path = shell_quote(path)
+        );
+        let output = self
+            .spawn_shell(&script)?
+            .output()
+            .context("failed to spawn provider shell")?;
+        if !output.status.success() {
+            let mut message = format!(
+                "provider path existence probe failed with status {}",
+                output.status
+            );
+            append_process_failure_output(&mut message, "stdout", &output.stdout);
+            append_process_failure_output(&mut message, "stderr", &output.stderr);
+            bail!("{message}");
+        }
+        Ok(output.stdout.starts_with(b"1"))
     }
 
     fn push_path(&self, local_path: &Path, remote_parent: &str, log: &mut String) -> Result<()> {
@@ -668,7 +725,13 @@ fn pipe_commands(
     Ok(())
 }
 
-fn bootstrap_script(runtime_root: &str, repo_root: &str, target_root: &str) -> String {
+fn bootstrap_script(
+    runtime_root: &str,
+    repo_root: &str,
+    target_root: &str,
+    binary_path: &str,
+    source_fingerprint: &str,
+) -> String {
     format!(
         r#"
 set -eu
@@ -693,7 +756,13 @@ if ! command -v cargo >/dev/null 2>&1; then
   curl --fail --location --silent --show-error https://sh.rustup.rs | sh -s -- -y --profile minimal
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo build --release --locked --manifest-path {manifest} --target-dir {target}
+if [ ! -f {binary_build_stamp} ] || [ ! -x {binary_path} ]; then
+  echo "provider binary build: cold"
+  cargo build --release --locked --manifest-path {manifest} --target-dir {target}
+  touch {binary_build_stamp}
+else
+  echo "provider binary build: warm"
+fi
 "#,
         runtime_root = shell_quote(runtime_root),
         bootstrap_stamp = shell_quote(&format!(
@@ -701,7 +770,123 @@ cargo build --release --locked --manifest-path {manifest} --target-dir {target}
         )),
         manifest = shell_quote(&format!("{repo_root}/cli/Cargo.toml")),
         target = shell_quote(target_root),
+        binary_path = shell_quote(binary_path),
+        binary_build_stamp = shell_quote(&format!(
+            "{runtime_root}/binary-build-{source_fingerprint}.stamp"
+        )),
     )
+}
+
+fn prepare_provider_source_bundle(source_repo: &Path) -> Result<ProviderSourceBundle> {
+    let fingerprint = provider_source_bundle_fingerprint(source_repo)?;
+    let bundle_parent = std::env::temp_dir()
+        .join("depos-provider-source-bundles")
+        .join(&fingerprint);
+    let bundle_root = bundle_parent.join(file_name_string(source_repo)?);
+    if !bundle_root.join("cli/Cargo.toml").is_file() {
+        remove_existing_path(&bundle_parent)?;
+        copy_provider_source_bundle(source_repo, &bundle_root)?;
+    }
+    Ok(ProviderSourceBundle {
+        local_root: bundle_root,
+        fingerprint,
+    })
+}
+
+fn provider_source_bundle_fingerprint(source_repo: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hash_provider_source_entry(&mut hasher, source_repo, Path::new("Cargo.toml"))?;
+    hash_provider_source_entry(&mut hasher, source_repo, Path::new("Cargo.lock"))?;
+    if source_repo.join(".cargo").exists() {
+        hash_provider_source_entry(&mut hasher, source_repo, Path::new(".cargo"))?;
+    }
+    hash_provider_source_entry(&mut hasher, source_repo, Path::new("cli/Cargo.toml"))?;
+    hash_provider_source_entry(&mut hasher, source_repo, Path::new("cli/src"))?;
+    Ok(format!("{:x}", hasher.finalize())[..16].to_string())
+}
+
+fn hash_provider_source_entry(
+    hasher: &mut Sha256,
+    source_repo: &Path,
+    relative: &Path,
+) -> Result<()> {
+    let path = source_repo.join(relative);
+    let metadata =
+        fs::metadata(&path).with_context(|| format!("failed to stat {}", path.display()))?;
+    if metadata.is_dir() {
+        hasher.update(b"dir\0");
+        hasher.update(relative.display().to_string().as_bytes());
+        hasher.update([0]);
+        let mut entries = fs::read_dir(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let child_relative = relative.join(entry.file_name());
+            hash_provider_source_entry(hasher, source_repo, &child_relative)?;
+        }
+    } else {
+        hasher.update(b"file\0");
+        hasher.update(relative.display().to_string().as_bytes());
+        hasher.update([0]);
+        hasher
+            .update(fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?);
+    }
+    Ok(())
+}
+
+fn copy_provider_source_bundle(source_repo: &Path, bundle_root: &Path) -> Result<()> {
+    fs::create_dir_all(bundle_root)
+        .with_context(|| format!("failed to create {}", bundle_root.display()))?;
+    copy_provider_source_entry(source_repo, bundle_root, Path::new("Cargo.toml"))?;
+    copy_provider_source_entry(source_repo, bundle_root, Path::new("Cargo.lock"))?;
+    if source_repo.join(".cargo").exists() {
+        copy_provider_source_entry(source_repo, bundle_root, Path::new(".cargo"))?;
+    }
+    copy_provider_source_entry(source_repo, bundle_root, Path::new("cli/Cargo.toml"))?;
+    copy_provider_source_entry(source_repo, bundle_root, Path::new("cli/src"))?;
+    Ok(())
+}
+
+fn copy_provider_source_entry(
+    source_repo: &Path,
+    bundle_root: &Path,
+    relative: &Path,
+) -> Result<()> {
+    let source = source_repo.join(relative);
+    let destination = bundle_root.join(relative);
+    let metadata =
+        fs::metadata(&source).with_context(|| format!("failed to stat {}", source.display()))?;
+    if metadata.is_dir() {
+        fs::create_dir_all(&destination)
+            .with_context(|| format!("failed to create {}", destination.display()))?;
+        let mut entries = fs::read_dir(&source)
+            .with_context(|| format!("failed to read {}", source.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to read {}", source.display()))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            copy_provider_source_entry(
+                source_repo,
+                bundle_root,
+                &relative.join(entry.file_name()),
+            )?;
+        }
+    } else {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::copy(&source, &destination).with_context(|| {
+            format!(
+                "failed to copy provider source bundle entry {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn provider_source_repo() -> Result<PathBuf> {

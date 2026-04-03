@@ -462,6 +462,14 @@ fn sync_reuses_wsl_provider_bootstrap_state_across_oci_builds() {
         second_log.contains("provider bootstrap: warm"),
         "expected second build log to show warm provider bootstrap, got:\n{second_log}"
     );
+    assert!(
+        second_log.contains("provider source sync: warm"),
+        "expected second build log to show warm provider source sync, got:\n{second_log}"
+    );
+    assert!(
+        second_log.contains("provider binary build: warm"),
+        "expected second build log to show warm provider binary build, got:\n{second_log}"
+    );
 }
 
 #[cfg(target_os = "windows")]
