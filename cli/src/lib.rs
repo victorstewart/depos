@@ -2422,6 +2422,10 @@ fn build_command_environment(
             ("CFLAGS".to_string(), String::new()),
             ("CXXFLAGS".to_string(), String::new()),
             ("LDFLAGS".to_string(), String::new()),
+            (
+                "QEMU_LD_PREFIX".to_string(),
+                format!("/usr/{target_prefix}"),
+            ),
         ]);
         env.push(("PKG_CONFIG_ALLOW_CROSS".to_string(), "1".to_string()));
     }
