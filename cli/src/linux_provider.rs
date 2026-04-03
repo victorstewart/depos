@@ -569,20 +569,32 @@ fn runtime_hash_string(path: &Path) -> String {
 }
 
 fn configured_provider_runtime_layout(source_repo: &Path) -> Result<ProviderRuntimeLayout> {
-    let root = if let Some(raw) = std::env::var_os("DEPOS_LINUX_PROVIDER_ROOT") {
+    let explicit_root = std::env::var_os("DEPOS_LINUX_PROVIDER_ROOT");
+    let root = if let Some(raw) = explicit_root.as_ref() {
         raw.to_string_lossy().trim().to_string()
     } else {
         let runtime_hash = runtime_hash_string(source_repo);
         format!("/var/tmp/depos-provider/{PROVIDER_RUNTIME_LAYOUT_VERSION}/{runtime_hash}")
     };
-    ProviderRuntimeLayout::new(root)
+    ProviderRuntimeLayout::new(root.clone()).map_err(|error| {
+        if explicit_root.is_some() {
+            anyhow!("DEPOS_LINUX_PROVIDER_ROOT must be an absolute Linux path: {root}")
+        } else {
+            error
+        }
+    })
 }
 
 fn configured_provider_selection() -> Result<LocalLinuxProviderSelection> {
     let Some(raw) = std::env::var_os("DEPOS_LINUX_PROVIDER") else {
         return Ok(LocalLinuxProviderSelection::Auto);
     };
-    LocalLinuxProviderSelection::from_str(raw.to_string_lossy().trim())
+    let selection = raw.to_string_lossy().trim().to_string();
+    LocalLinuxProviderSelection::from_str(&selection).map_err(|_| {
+        anyhow!(
+            "unsupported DEPOS_LINUX_PROVIDER={selection}; expected one of: auto, wsl2, mac-local"
+        )
+    })
 }
 
 fn file_name_string(path: &Path) -> Result<String> {
