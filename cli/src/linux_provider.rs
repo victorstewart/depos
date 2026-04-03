@@ -84,7 +84,7 @@ pub(crate) fn execute_linux_provider_command_pipeline(
             stage_registered_depofile(&provider, depos_root, dependency, &job.depos_root, log)?;
         }
         let dependency_store_root = package_store_root(depos_root, &job.variant, dependency);
-        provider.push_path(
+        provider.push_package_store_root(
             &dependency_store_root,
             &remote_store_parent(&job.variant_root, dependency),
             log,
@@ -465,6 +465,36 @@ impl LinuxProvider {
             &format!(
                 "mkdir -p {parent} && tar -xf - -C {parent}",
                 parent = shell_quote(remote_parent)
+            ),
+            log,
+        )
+    }
+
+    fn push_package_store_root(
+        &self,
+        local_path: &Path,
+        remote_parent: &str,
+        log: &mut String,
+    ) -> Result<()> {
+        let local_path = canonical_path(local_path)
+            .with_context(|| format!("failed to access {}", local_path.display()))?;
+        let parent = local_path
+            .parent()
+            .ok_or_else(|| anyhow!("path has no parent: {}", local_path.display()))?;
+        let name = file_name_string(&local_path)?;
+        let remote_root = format!("{remote_parent}/{name}");
+        self.pipe_host_tar_to_provider(
+            &[
+                "-cf".to_string(),
+                "-".to_string(),
+                "-C".to_string(),
+                parent.display().to_string(),
+                name,
+            ],
+            &format!(
+                "mkdir -p {parent} && tar -xf - -C {parent} && if [ -d {root}/bin ]; then find {root}/bin -type f -exec chmod a+rx {{}} +; fi",
+                parent = shell_quote(remote_parent),
+                root = shell_quote(&remote_root),
             ),
             log,
         )

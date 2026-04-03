@@ -756,7 +756,7 @@ fn sync_builds_cross_target_linux_oci_package_with_provider_when_enabled() {
             &sandbox,
             package_name,
             &format!(
-                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/${{DEPO_BUILD_ARCH}}-to-${{DEPO_TARGET_ARCH}}.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n",
+                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/${{DEPO_BUILD_ARCH}}-to-${{DEPO_TARGET_ARCH}}.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n",
                 portable_file_url(&archive),
                 host_arch(),
                 foreign_arch(),
@@ -874,16 +874,25 @@ fn sync_builds_cross_target_linux_oci_cmake_binary_with_provider_when_enabled() 
             &format!("bin/{package_name}"),
         )
         .is_file());
+    let arch_proof_path = sandbox.package_store_path_for_target_arch(
+        package_name,
+        RELEASE_NAMESPACE,
+        "1.0.0",
+        target_arch,
+        &format!("share/{package_name}/arch.txt"),
+    );
+    let arch_proof = fs::read_to_string(&arch_proof_path).unwrap_or_else(|error| {
+        panic!(
+            "read cross CMake arch proof {}: {error}\nmaterialization log:\n{}",
+            arch_proof_path.display(),
+            sandbox.read_materialization_log(package_name, RELEASE_NAMESPACE, "1.0.0"),
+        )
+    });
     assert!(
-        fs::read_to_string(sandbox.package_store_path_for_target_arch(
-            package_name,
-            RELEASE_NAMESPACE,
-            "1.0.0",
-            target_arch,
-            &format!("share/{package_name}/arch.txt"),
-        ))
-        .expect("read cross CMake arch proof")
-        .contains(cross_readelf_machine_pattern(target_arch)),
+        arch_proof.contains(cross_readelf_machine_pattern(target_arch)),
+        "expected {:?} in cross CMake arch proof:\n{}",
+        cross_readelf_machine_pattern(target_arch),
+        arch_proof,
     );
 }
 
@@ -1273,7 +1282,6 @@ impl Sandbox {
             .join(relative)
     }
 
-    #[cfg(target_os = "windows")]
     fn read_materialization_log(&self, name: &str, namespace: &str, version: &str) -> String {
         fs::read_to_string(
             self.depos_root()
