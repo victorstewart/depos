@@ -96,10 +96,7 @@ jobs:
           $manifest = (Resolve-Path "cli/Cargo.toml").Path.Replace("'", "''")
           $workspace = (Resolve-Path ".").Path
           $escapedLog = $log.Replace("'", "''")
-          $command = @"
-& cargo test --locked --manifest-path '$manifest' -j $env:NUMBER_OF_PROCESSORS 2>&1 | Tee-Object -FilePath '$escapedLog'
-exit `$LASTEXITCODE
-"@
+          $command = "& cargo test --locked --manifest-path '$manifest' -j $env:NUMBER_OF_PROCESSORS 2>&1 | Tee-Object -FilePath '$escapedLog'; exit `$LASTEXITCODE"
           $proc = Start-Process -FilePath "pwsh" -ArgumentList @("-NoLogo", "-NoProfile", "-Command", $command) -WorkingDirectory $workspace -PassThru
           $deadline = (Get-Date).AddMinutes(25)
           $exitCode = $null
