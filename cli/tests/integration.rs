@@ -3529,7 +3529,7 @@ fn cmake_depofile_consumer_matrix_cascades_transitive_dependencies() {
         2,
     );
 
-        for consumer_mode in ["package", "path"] {
+    for consumer_mode in ["package", "path"] {
         for resolution_mode in ["explicit", "bootstrap"] {
             let scenario = format!("consumer-{consumer_mode}-{resolution_mode}");
             let (_library_repo, published_depofile) =

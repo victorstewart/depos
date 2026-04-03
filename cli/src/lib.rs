@@ -4118,12 +4118,8 @@ fn package_exports_present(spec: &PackageSpec, store_root: &Path) -> Result<bool
 }
 
 fn registered_depofile_hash(depos_root: &Path, spec: &PackageSpec) -> Result<String> {
-    let path = resolve_registered_depofile_path(
-        depos_root,
-        &spec.name,
-        &spec.namespace,
-        &spec.version,
-    )?;
+    let path =
+        resolve_registered_depofile_path(depos_root, &spec.name, &spec.namespace, &spec.version)?;
     hash_file_sha256(&path)
 }
 
@@ -6187,7 +6183,10 @@ fn copy_embedded_depofiles_into_catalog(
     Ok(())
 }
 
-fn embedded_depofile_roots(owner: &PackageSpec, fetched_source_root: &Path) -> Result<Vec<PathBuf>> {
+fn embedded_depofile_roots(
+    owner: &PackageSpec,
+    fetched_source_root: &Path,
+) -> Result<Vec<PathBuf>> {
     let mut roots = Vec::new();
     let source_root = resolve_source_root(fetched_source_root, owner)?;
     for candidate in [
