@@ -207,7 +207,7 @@ fn sync_rejects_build_root_scratch_off_linux() {
 }
 
 #[test]
-fn sync_rejects_build_root_oci_off_linux() {
+fn sync_rejects_build_root_oci_without_toolchain_rootfs_off_linux() {
     let sandbox = Sandbox::new();
     let archive = sandbox.create_source_archive(
         "upstreams/oci_demo",
@@ -217,17 +217,17 @@ fn sync_rejects_build_root_oci_off_linux() {
         &sandbox,
         "oci_demo",
         &format!(
-            "NAME oci_demo\nVERSION 1.0.0\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET oci_demo::oci_demo INTERFACE include\n",
+            "NAME oci_demo\nVERSION 1.0.0\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD cargo --version\nTARGET oci_demo::oci_demo INTERFACE include\n",
             portable_file_url(&archive)
         ),
     )
-    .expect_err("BUILD_ROOT OCI should be rejected off Linux");
+    .expect_err("BUILD_ROOT OCI without TOOLCHAIN ROOTFS should be rejected off Linux");
     assert_error_contains(&error, "BUILD_ROOT OCI");
-    assert_error_contains(&error, "only supported on Linux");
+    assert_error_contains(&error, "without TOOLCHAIN ROOTFS");
 }
 
 #[test]
-fn sync_rejects_toolchain_rootfs_off_linux() {
+fn sync_rejects_toolchain_rootfs_without_oci_off_linux() {
     let sandbox = Sandbox::new();
     let archive = sandbox.create_source_archive(
         "upstreams/rootfs_demo",
@@ -241,8 +241,8 @@ fn sync_rejects_toolchain_rootfs_off_linux() {
             portable_file_url(&archive)
         ),
     )
-    .expect_err("TOOLCHAIN ROOTFS should be rejected off Linux");
-    assert_error_contains(&error, "TOOLCHAIN ROOTFS is only supported on Linux");
+    .expect_err("TOOLCHAIN ROOTFS without BUILD_ROOT OCI should be rejected off Linux");
+    assert_error_contains(&error, "TOOLCHAIN ROOTFS without BUILD_ROOT OCI");
 }
 
 #[test]
@@ -263,10 +263,190 @@ fn sync_rejects_non_host_native_build_request_off_linux() {
         ),
     )
     .expect_err("non-host-native request should be rejected off Linux");
-    assert_error_contains(
-        &error,
-        "non-Linux backends only support host-native BUILD_ROOT SYSTEM",
+    assert_error_contains(&error, "without BUILD_ROOT OCI");
+}
+
+#[test]
+fn sync_builds_linux_oci_package_with_provider_when_enabled() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let package_name = "linux_provider_demo";
+    let archive = sandbox.create_source_archive(
+        "upstreams/linux_provider_demo",
+        &[("payload/demo.h", "#pragma once\n")],
     );
+    sync_with_depofile(
+        &sandbox,
+        package_name,
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/demo.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n",
+            portable_file_url(&archive)
+        ),
+    )
+    .expect("BUILD_ROOT OCI should route through the Linux provider");
+
+    assert!(sandbox
+        .package_store_path_for_target_arch(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            host_arch().as_str(),
+            &format!("include/{package_name}/demo.h"),
+        )
+        .is_file());
+}
+
+#[test]
+fn sync_builds_linux_oci_cargo_binary_with_provider_when_enabled() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let package_name = "linux_provider_cargo_demo";
+    let archive = sandbox.create_source_archive(
+        "upstreams/linux_provider_cargo_demo",
+        &[
+            (
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname = \"{package_name}\"\nversion = \"1.0.0\"\nedition = \"2021\"\n"
+                ),
+            ),
+            (
+                "src/main.rs",
+                "fn main() {\n    println!(\"linux-provider-cargo-demo\");\n}\n",
+            ),
+        ],
+    );
+    sync_with_depofile(
+        &sandbox,
+        package_name,
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM CARGO\nSTAGE_FILE BUILD cargo-target/release/{package_name} bin/{package_name}\nARTIFACT bin/{package_name}\n",
+            portable_file_url(&archive)
+        ),
+    )
+    .expect("provider-backed OCI build should produce a Linux cargo binary");
+
+    assert!(sandbox
+        .package_store_path_for_target_arch(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            host_arch().as_str(),
+            &format!("bin/{package_name}"),
+        )
+        .is_file());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sync_reports_missing_direct_apple_virtualization_helper_for_oci_requests() {
+    if linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let archive = sandbox.create_source_archive(
+        "upstreams/avf_missing_demo",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+    let error = sync_with_depofile(
+        &sandbox,
+        "avf_missing_demo",
+        &format!(
+            "NAME avf_missing_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/demo.h\" \"${{DEPO_PREFIX}}/include/avf_missing_demo/demo.h\"\nEOF\nTARGET avf_missing_demo::avf_missing_demo INTERFACE include\n",
+            portable_file_url(&archive)
+        ),
+    )
+    .expect_err("macOS OCI provider should require a direct Apple Virtualization helper");
+    assert_error_contains(&error, "direct Apple Virtualization helper");
+    assert_error_contains(&error, "DEPOS_APPLE_VIRTUALIZATION_HELPER");
+}
+
+#[test]
+fn sync_builds_cross_target_linux_oci_package_with_provider_when_enabled() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let package_name = "linux_provider_cross_demo";
+    let archive = sandbox.create_source_archive(
+        "upstreams/linux_provider_cross_demo",
+        &[(
+            &format!("payload/{}-to-{}.h", host_arch(), foreign_arch()),
+            "// cross target\n",
+        )],
+    );
+    sync_with_depofile(
+        &sandbox,
+        package_name,
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/${{DEPO_BUILD_ARCH}}-to-${{DEPO_TARGET_ARCH}}.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n",
+            portable_file_url(&archive),
+            host_arch(),
+            foreign_arch(),
+        ),
+    )
+    .expect("cross-target BUILD_ROOT OCI should route through the Linux provider");
+
+    assert!(sandbox
+        .package_store_path_for_target_arch(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            foreign_arch(),
+            &format!("include/{package_name}/demo.h"),
+        )
+        .is_file());
+}
+
+#[test]
+fn sync_builds_cross_target_linux_oci_cargo_binary_with_provider_when_enabled() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let package_name = "linux_provider_cross_cargo_demo";
+    let target_arch = foreign_arch();
+    let target_triple = linux_target_triple(target_arch);
+    let archive = sandbox.create_source_archive(
+        "upstreams/linux_provider_cross_cargo_demo",
+        &[
+            (
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname = \"{package_name}\"\nversion = \"1.0.0\"\nedition = \"2021\"\n"
+                ),
+            ),
+            (
+                "src/main.rs",
+                "fn main() {\n    println!(\"linux-provider-cross-cargo-demo\");\n}\n",
+            ),
+        ],
+    );
+    sync_with_depofile(
+        &sandbox,
+        package_name,
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM CARGO\nSTAGE_FILE BUILD cargo-target/{target_triple}/release/{package_name} bin/{package_name}\nARTIFACT bin/{package_name}\n",
+            portable_file_url(&archive),
+            host_arch(),
+            target_arch,
+        ),
+    )
+    .expect("provider-backed OCI build should cross-compile a Linux cargo binary");
+
+    assert!(sandbox
+        .package_store_path_for_target_arch(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            target_arch,
+            &format!("bin/{package_name}"),
+        )
+        .is_file());
 }
 
 fn sync_with_depofile(sandbox: &Sandbox, name: &str, depofile: &str) -> anyhow::Result<()> {
@@ -324,6 +504,22 @@ fn foreign_arch() -> &'static str {
     }
 }
 
+fn linux_target_triple(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "x86_64-unknown-linux-gnu",
+        "aarch64" => "aarch64-unknown-linux-gnu",
+        "riscv64" => "riscv64gc-unknown-linux-gnu",
+        other => panic!("unsupported linux target triple arch {other}"),
+    }
+}
+
+fn linux_provider_tests_enabled() -> bool {
+    matches!(
+        std::env::var("DEPOS_TEST_LINUX_PROVIDER").as_deref(),
+        Ok("1")
+    )
+}
+
 struct Sandbox {
     root: TempDir,
 }
@@ -347,9 +543,26 @@ impl Sandbox {
         version: &str,
         relative: &str,
     ) -> PathBuf {
+        self.package_store_path_for_target_arch(
+            name,
+            namespace,
+            version,
+            host_arch().as_str(),
+            relative,
+        )
+    }
+
+    fn package_store_path_for_target_arch(
+        &self,
+        name: &str,
+        namespace: &str,
+        version: &str,
+        target_arch: &str,
+        relative: &str,
+    ) -> PathBuf {
         self.depos_root()
             .join("store")
-            .join(depos::default_variant())
+            .join(format!("{target_arch}-{target_arch}_v1"))
             .join(name)
             .join(namespace)
             .join(version)

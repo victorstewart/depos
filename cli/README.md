@@ -28,15 +28,19 @@ depos sync --depos-root "$PWD/.deps/depos" --manifest /path/to/deps.cmake
 ## Current Scope
 
 - Linux: `BUILD_ROOT SYSTEM`, `BUILD_ROOT SCRATCH`, `BUILD_ROOT OCI <ref>`, `TOOLCHAIN ROOTFS`, and foreign-architecture OCI execution
-- macOS: native `BUILD_ROOT SYSTEM` only in this pass
-- Windows: native `BUILD_ROOT SYSTEM` only in this pass
+- macOS: native `BUILD_ROOT SYSTEM` plus [EXPERIMENTAL] `BUILD_ROOT OCI <ref>` through a local Linux provider
+- Windows: native `BUILD_ROOT SYSTEM` plus [EXPERIMENTAL] `BUILD_ROOT OCI <ref>` through a local Linux provider
 
-On macOS and Windows, `depos` explicitly rejects:
+On macOS and Windows, `depos` still explicitly rejects:
 
 - `BUILD_ROOT SCRATCH`
-- `BUILD_ROOT OCI <ref>`
-- `TOOLCHAIN ROOTFS`
-- `BUILD_ARCH != TARGET_ARCH`
+- `TOOLCHAIN ROOTFS` without `BUILD_ROOT OCI <ref>`
+- `BUILD_ARCH != TARGET_ARCH` without `BUILD_ROOT OCI <ref>`
+
+[EXPERIMENTAL] On macOS and Windows, selecting `BUILD_ROOT OCI <ref>` routes the package build through a local Linux provider instead of the host-native portable backend:
+
+- Windows: WSL2
+- macOS: a direct Apple Virtualization helper and Linux guest
 
 ## Docs
 

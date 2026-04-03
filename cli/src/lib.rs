@@ -30,6 +30,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod linux_provider;
+
 const DEFAULT_NAMESPACE: &str = "release";
 const CELL_SOURCE_DIR: &str = "/work/source";
 const CELL_BUILD_DIR: &str = "/work/build";
@@ -492,6 +495,17 @@ pub struct SyncOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InternalMaterializePreparedOptions {
+    pub depos_root: PathBuf,
+    pub name: String,
+    pub namespace: String,
+    pub version: String,
+    pub source_root: PathBuf,
+    pub store_root: PathBuf,
+    pub executable: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisterOptions {
     pub depos_root: PathBuf,
     pub file: PathBuf,
@@ -592,6 +606,48 @@ fn normalize_arch_name(value: &str) -> Result<String> {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn linux_gnu_target_triple(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "x86_64-unknown-linux-gnu",
+        "aarch64" => "aarch64-unknown-linux-gnu",
+        "riscv64" => "riscv64gc-unknown-linux-gnu",
+        other => panic!("unsupported linux gnu target triple architecture {}", other),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn linux_gnu_toolchain_prefix(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "x86_64-linux-gnu",
+        "aarch64" => "aarch64-linux-gnu",
+        "riscv64" => "riscv64-linux-gnu",
+        other => panic!(
+            "unsupported linux gnu toolchain prefix architecture {}",
+            other
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn debian_crossbuild_package(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "crossbuild-essential-amd64",
+        "aarch64" => "crossbuild-essential-arm64",
+        "riscv64" => "crossbuild-essential-riscv64",
+        other => panic!("unsupported debian crossbuild architecture {}", other),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn cargo_target_env_fragment(triple: &str) -> String {
+    triple.replace('-', "_").to_ascii_uppercase()
+}
+
 pub fn registry_dir_from_manifest(depos_root: &Path, manifest: &Path) -> Result<PathBuf> {
     let depos_root = resolve_depos_root(depos_root)?;
     let catalog = load_catalog(&depos_root)?;
@@ -661,6 +717,74 @@ pub fn sync_registry(options: &SyncOptions) -> Result<RegistryOutput> {
         targets_file,
         selected,
     })
+}
+
+#[cfg(target_os = "linux")]
+pub fn internal_materialize_prepared(options: &InternalMaterializePreparedOptions) -> Result<()> {
+    let depos_root = resolve_depos_root(&options.depos_root).with_context(|| {
+        format!(
+            "failed to access provider depos root {}",
+            options.depos_root.display()
+        )
+    })?;
+    ensure_package_name(&options.name)?;
+    ensure_namespace_name(&options.namespace)?;
+    let depofile = registered_depofile_path(
+        &depos_root,
+        &options.name,
+        &options.namespace,
+        &options.version,
+    );
+    let spec = parse_registered_depofile(
+        &depofile,
+        &options.name,
+        &options.namespace,
+        &options.version,
+    )?;
+    let source_root = canonical_path(&options.source_root).with_context(|| {
+        format!(
+            "failed to access source root {}",
+            options.source_root.display()
+        )
+    })?;
+    let store_root = options.store_root.clone();
+    if let Some(parent) = store_root.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut log = String::new();
+    log.push_str(&format!(
+        "provider materializing {} from prepared source {}\n",
+        spec.package_id(),
+        source_root.display()
+    ));
+    let result = if spec.configure.is_empty()
+        && spec.build.is_empty()
+        && spec.install.is_empty()
+        && spec.stage_entries.is_empty()
+    {
+        copy_declared_exports(&depos_root, &source_root, &store_root, &spec, &mut log)
+    } else {
+        execute_command_pipeline(
+            &depos_root,
+            &store_root,
+            &spec,
+            &options.executable,
+            &source_root,
+            &mut log,
+        )
+    };
+    match result {
+        Ok(_) => {
+            log.push_str("provider materialization complete\n");
+            eprint!("{log}");
+            Ok(())
+        }
+        Err(error) => {
+            eprint!("{log}");
+            Err(error)
+        }
+    }
 }
 
 fn materialize_local_packages(
@@ -1213,6 +1337,15 @@ fn execute_command_pipeline(
         variables: &variables,
     };
 
+    let provider_bootstrap = linux_provider_bootstrap_commands(spec)?;
+    execute_command_phase(
+        &phase_context,
+        default_phase_cwd(spec, "CONFIGURE"),
+        "PROVIDER_BOOTSTRAP",
+        &provider_bootstrap,
+        log,
+    )?;
+
     execute_command_phase(
         &phase_context,
         default_phase_cwd(spec, "CONFIGURE"),
@@ -1278,6 +1411,15 @@ fn execute_command_pipeline(
     log: &mut String,
 ) -> Result<Vec<PathBuf>> {
     validate_supported_command_pipeline(spec)?;
+    if matches!(spec.build_root, BuildRoot::Oci(_)) {
+        return linux_provider::execute_linux_provider_command_pipeline(
+            depos_root,
+            store_root,
+            spec,
+            source_root,
+            log,
+        );
+    }
     let variant = variant_for_target_arch(&spec.target_arch)?;
     let variant_root = depos_root.join("store").join(&variant);
     let dependency_specs = resolve_dependency_specs(depos_root, spec)?;
@@ -1903,30 +2045,34 @@ fn validate_supported_command_pipeline(spec: &PackageSpec) -> Result<()> {
 fn validate_supported_command_pipeline(spec: &PackageSpec) -> Result<()> {
     if !spec.toolchain_inputs.is_empty() {
         bail!(
-            "package '{}' uses TOOLCHAIN_INPUT, but TOOLCHAIN_INPUT is only supported on Linux BUILD_ROOT SCRATCH/OCI paths in this pass",
+            "package '{}' uses TOOLCHAIN_INPUT, but TOOLCHAIN_INPUT is only supported on Linux BUILD_ROOT SCRATCH or BUILD_ROOT OCI paths",
             spec.package_id()
         );
     }
     match (&spec.build_root, &spec.toolchain) {
         (BuildRoot::System, ToolchainSource::System) => {}
         (BuildRoot::System, ToolchainSource::Rootfs) => bail!(
-            "package '{}' uses TOOLCHAIN ROOTFS, but TOOLCHAIN ROOTFS is only supported on Linux",
+            "package '{}' uses TOOLCHAIN ROOTFS without BUILD_ROOT OCI; on macOS and Windows, Linux provider builds require BUILD_ROOT OCI <image>",
             spec.package_id()
         ),
         (BuildRoot::Scratch, _) => bail!(
             "package '{}' uses BUILD_ROOT SCRATCH, but BUILD_ROOT SCRATCH is only supported on Linux",
             spec.package_id()
         ),
-        (BuildRoot::Oci(reference), _) => bail!(
-            "package '{}' uses BUILD_ROOT OCI {}, but BUILD_ROOT OCI is only supported on Linux",
+        (BuildRoot::Oci(reference), ToolchainSource::System) => bail!(
+            "package '{}' uses BUILD_ROOT OCI {} without TOOLCHAIN ROOTFS, which is not supported",
             spec.package_id(),
             reference
         ),
+        (BuildRoot::Oci(_), ToolchainSource::Rootfs) => {}
     }
     let host = host_arch();
+    if matches!(spec.build_root, BuildRoot::Oci(_)) {
+        return Ok(());
+    }
     if spec.build_arch != host || spec.target_arch != host {
         bail!(
-            "package '{}' requests BUILD_ARCH '{}' / TARGET_ARCH '{}', but non-Linux backends only support host-native BUILD_ROOT SYSTEM in this pass",
+            "package '{}' requests BUILD_ARCH '{}' / TARGET_ARCH '{}' without BUILD_ROOT OCI; on macOS and Windows, Linux-targeted advanced builds require BUILD_ROOT OCI <image>",
             spec.package_id(),
             spec.build_arch,
             spec.target_arch
@@ -1972,6 +2118,14 @@ fn build_command_variables(
     variables.insert("DEPO_DEPS_DIR".to_string(), CELL_DEPS_DIR.to_string());
     variables.insert("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone());
     variables.insert("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone());
+    variables.insert(
+        "DEPO_BUILD_TRIPLE".to_string(),
+        linux_gnu_target_triple(&spec.build_arch).to_string(),
+    );
+    variables.insert(
+        "DEPO_TARGET_TRIPLE".to_string(),
+        linux_gnu_target_triple(&spec.target_arch).to_string(),
+    );
     for dependency in dependency_specs {
         let root = format!(
             "{}/{}",
@@ -2004,6 +2158,118 @@ fn host_rust_toolchain_dir(env_var: &str, home_suffix: &str) -> Option<PathBuf> 
         Some(path) if path.is_absolute() && path.exists() => Some(path),
         _ => None,
     }
+}
+
+#[cfg(target_os = "linux")]
+const PROVIDER_CARGO_HOME_DIR: &str = "/work/build/provider-cargo-home";
+#[cfg(target_os = "linux")]
+const PROVIDER_RUSTUP_HOME_DIR: &str = "/work/build/provider-rustup-home";
+
+#[cfg(target_os = "linux")]
+fn linux_provider_mode_enabled() -> bool {
+    matches!(
+        std::env::var("DEPOS_INTERNAL_LINUX_PROVIDER").as_deref(),
+        Ok("1")
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_provider_cache_root() -> Result<Option<PathBuf>> {
+    let Some(value) = std::env::var_os("DEPOS_PROVIDER_CACHE_ROOT") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        bail!(
+            "DEPOS_PROVIDER_CACHE_ROOT must be an absolute path, got {}",
+            path.display()
+        );
+    }
+    Ok(Some(path))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_provider_cache_mounts() -> Result<Vec<BindMount>> {
+    let Some(cache_root) = linux_provider_cache_root()? else {
+        return Ok(Vec::new());
+    };
+    let cargo_home = cache_root.join("cargo-home");
+    let rustup_home = cache_root.join("rustup-home");
+    fs::create_dir_all(&cargo_home)
+        .with_context(|| format!("failed to create {}", cargo_home.display()))?;
+    fs::create_dir_all(&rustup_home)
+        .with_context(|| format!("failed to create {}", rustup_home.display()))?;
+    Ok(vec![
+        BindMount {
+            source: cargo_home,
+            destination: PROVIDER_CARGO_HOME_DIR.to_string(),
+            read_only: false,
+        },
+        BindMount {
+            source: rustup_home,
+            destination: PROVIDER_RUSTUP_HOME_DIR.to_string(),
+            read_only: false,
+        },
+    ])
+}
+
+#[cfg(target_os = "linux")]
+fn linux_provider_bootstrap_commands(spec: &PackageSpec) -> Result<Vec<Vec<String>>> {
+    if !linux_provider_mode_enabled()
+        || !matches!(
+            (&spec.build_root, &spec.toolchain),
+            (BuildRoot::Oci(_), ToolchainSource::Rootfs)
+        )
+    {
+        return Ok(Vec::new());
+    }
+    match spec.build_system {
+        BuildSystem::Cargo => Ok(shell_phase(linux_provider_cargo_bootstrap_script(spec))),
+        _ => Ok(Vec::new()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_provider_cargo_bootstrap_script(spec: &PackageSpec) -> String {
+    let build_triple = linux_gnu_target_triple(&spec.build_arch);
+    let target_triple = linux_gnu_target_triple(&spec.target_arch);
+    let cross_package_install = if spec.build_arch == spec.target_arch {
+        String::new()
+    } else {
+        format!(
+            "\napt-get install -y {}",
+            debian_crossbuild_package(&spec.target_arch)
+        )
+    };
+    format!(
+        r#"
+export DEBIAN_FRONTEND=noninteractive
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y build-essential clang cmake curl file git pkg-config ca-certificates{cross_package_install}
+elif ! command -v cargo >/dev/null 2>&1; then
+  echo "BUILD_SYSTEM CARGO via the Linux provider currently requires a Debian or Ubuntu OCI base image, or a base image that already has cargo installed" >&2
+  exit 1
+fi
+export CARGO_HOME="${{CARGO_HOME:-{cargo_home}}}"
+export RUSTUP_HOME="${{RUSTUP_HOME:-{rustup_home}}}"
+export PATH="$CARGO_HOME/bin:$PATH"
+if ! command -v rustup >/dev/null 2>&1; then
+  curl --fail --location --silent --show-error https://sh.rustup.rs | sh -s -- -y --profile minimal
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo was unavailable after rustup bootstrap" >&2
+  exit 1
+fi
+rustup target add {build_triple}
+rustup target add {target_triple}
+"#,
+        cross_package_install = cross_package_install,
+        cargo_home = PROVIDER_CARGO_HOME_DIR,
+        rustup_home = PROVIDER_RUSTUP_HOME_DIR,
+        build_triple = build_triple,
+        target_triple = target_triple,
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -2042,6 +2308,14 @@ fn build_command_environment(
         ("DEPO_DEPS_DIR".to_string(), CELL_DEPS_DIR.to_string()),
         ("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone()),
         ("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone()),
+        (
+            "DEPO_BUILD_TRIPLE".to_string(),
+            linux_gnu_target_triple(&spec.build_arch).to_string(),
+        ),
+        (
+            "DEPO_TARGET_TRIPLE".to_string(),
+            linux_gnu_target_triple(&spec.target_arch).to_string(),
+        ),
     ];
     if spec.toolchain == ToolchainSource::System {
         env.extend([
@@ -2076,6 +2350,58 @@ fn build_command_environment(
                 "/.metalor-toolchain/rustup-home".to_string(),
             ));
         }
+    }
+    if linux_provider_mode_enabled()
+        && matches!(
+            (&spec.build_root, &spec.toolchain),
+            (BuildRoot::Oci(_), ToolchainSource::Rootfs)
+        )
+    {
+        env.push((
+            "CARGO_HOME".to_string(),
+            PROVIDER_CARGO_HOME_DIR.to_string(),
+        ));
+        env.push((
+            "RUSTUP_HOME".to_string(),
+            PROVIDER_RUSTUP_HOME_DIR.to_string(),
+        ));
+    }
+    if spec.build_system == BuildSystem::Cargo && spec.build_arch != spec.target_arch {
+        let target_triple = linux_gnu_target_triple(&spec.target_arch);
+        let target_prefix = linux_gnu_toolchain_prefix(&spec.target_arch);
+        let target_fragment = cargo_target_env_fragment(target_triple);
+        let target_underscored = target_triple.replace('-', "_");
+        let target_underscored_upper = target_underscored.to_ascii_uppercase();
+        env.push(("CARGO_BUILD_TARGET".to_string(), target_triple.to_string()));
+        env.push((
+            format!("CARGO_TARGET_{target_fragment}_LINKER"),
+            format!("{target_prefix}-gcc"),
+        ));
+        env.push((
+            format!("CC_{target_underscored}"),
+            format!("{target_prefix}-gcc"),
+        ));
+        env.push((
+            format!("CC_{target_underscored_upper}"),
+            format!("{target_prefix}-gcc"),
+        ));
+        env.push((
+            format!("CXX_{target_underscored}"),
+            format!("{target_prefix}-g++"),
+        ));
+        env.push((
+            format!("CXX_{target_underscored_upper}"),
+            format!("{target_prefix}-g++"),
+        ));
+        env.push((
+            format!("AR_{target_underscored}"),
+            format!("{target_prefix}-ar"),
+        ));
+        env.push((
+            format!("AR_{target_underscored_upper}"),
+            format!("{target_prefix}-ar"),
+        ));
+        env.push(("PKG_CONFIG_ALLOW_CROSS".to_string(), "1".to_string()));
     }
     if !dependency_roots.is_empty() {
         env.push(("CMAKE_PREFIX_PATH".to_string(), dependency_roots.join(";")));
@@ -2188,6 +2514,7 @@ fn build_command_mounts(
                     read_only: true,
                 });
             }
+            mounts.extend(linux_provider_cache_mounts()?);
         }
     }
     Ok(mounts)

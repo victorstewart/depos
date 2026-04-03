@@ -3,6 +3,8 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+#[cfg(target_os = "linux")]
+use depos::InternalMaterializePreparedOptions;
 use depos::{
     collect_statuses, default_depos_root_path, register_depofile, registry_dir_from_manifest,
     sync_registry, unregister_depofile, RegisterOptions, StatusOptions, SyncOptions,
@@ -55,6 +57,24 @@ enum Command {
         executable: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         argv: Vec<String>,
+    },
+    #[cfg(target_os = "linux")]
+    #[command(hide = true, name = "internal-materialize-prepared")]
+    InternalMaterializePrepared {
+        #[arg(long)]
+        depos_root: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        namespace: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        source_root: PathBuf,
+        #[arg(long)]
+        store_root: PathBuf,
+        #[arg(long)]
+        executable: PathBuf,
     },
     Register {
         #[arg(long, default_value_os_t = default_depos_root())]
@@ -176,6 +196,26 @@ fn real_main() -> Result<()> {
                 emulator,
                 executable,
                 argv,
+            })?;
+        }
+        #[cfg(target_os = "linux")]
+        Command::InternalMaterializePrepared {
+            depos_root,
+            name,
+            namespace,
+            version,
+            source_root,
+            store_root,
+            executable,
+        } => {
+            depos::internal_materialize_prepared(&InternalMaterializePreparedOptions {
+                depos_root,
+                name,
+                namespace,
+                version,
+                source_root,
+                store_root,
+                executable,
             })?;
         }
         Command::Register {

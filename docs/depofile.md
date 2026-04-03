@@ -72,12 +72,11 @@ LINK openssl openssl::crypto openssl::ssl
 - `TOOLCHAIN ROOTFS`: Linux-only rootfs toolchain mode
 - `BUILD_ARCH` and `TARGET_ARCH`: build/target split for advanced Linux flows
 
-On macOS and Windows, `depos` supports native `BUILD_ROOT SYSTEM` only in this pass. It explicitly rejects:
+On macOS and Windows, `depos` keeps native `BUILD_ROOT SYSTEM` on the portable host backend. [EXPERIMENTAL] `BUILD_ROOT OCI <image>` now routes through a local Linux provider instead of being rejected outright. `depos` still explicitly rejects:
 
 - `BUILD_ROOT SCRATCH`
-- `BUILD_ROOT OCI`
-- `TOOLCHAIN ROOTFS`
-- `BUILD_ARCH != TARGET_ARCH`
+- `TOOLCHAIN ROOTFS` without `BUILD_ROOT OCI`
+- `BUILD_ARCH != TARGET_ARCH` without `BUILD_ROOT OCI`
 
 `DepoFile`s are trusted inputs. `depos` is not a hostile-code sandbox.
 

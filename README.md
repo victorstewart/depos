@@ -38,14 +38,17 @@ Why this exists: stop letting `/usr`, `/lib`, `/usr/local`, or some random SDK d
 - CMake-friendly imported targets
 - Linux isolated build roots when host leakage matters
 - Native macOS and Windows `BUILD_ROOT SYSTEM` support
+- [EXPERIMENTAL] macOS and Windows `BUILD_ROOT OCI <image>` support through a local Linux provider
 
 ## Choose A Root
 
 - `BUILD_ROOT SYSTEM` for convenience
 - `BUILD_ROOT SCRATCH` for minimal hermetic Linux builds
 - `BUILD_ROOT OCI <image>` for pinned Linux distro roots and cross-target packaging
-- On macOS and Windows, `depos` supports native `BUILD_ROOT SYSTEM` only in this pass
-- On macOS and Windows, `depos` explicitly rejects `BUILD_ROOT SCRATCH`, `BUILD_ROOT OCI`, `TOOLCHAIN ROOTFS`, and `BUILD_ARCH != TARGET_ARCH`
+- On macOS and Windows, native `BUILD_ROOT SYSTEM` stays on the portable host backend
+- [EXPERIMENTAL] On macOS and Windows, selecting `BUILD_ROOT OCI <image>` routes through a local Linux provider instead of the host-native portable backend
+- On macOS and Windows, `depos` still rejects `BUILD_ROOT SCRATCH`
+- On macOS and Windows, `TOOLCHAIN ROOTFS` and `BUILD_ARCH != TARGET_ARCH` still require `BUILD_ROOT OCI <image>`
 
 ## Learn More
 

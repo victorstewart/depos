@@ -41,14 +41,18 @@ Implemented today:
 - macOS native execution with `BUILD_ROOT SYSTEM`
 - Windows native execution with `BUILD_ROOT SYSTEM`
 
-On macOS and Windows, `depos` does not emulate the Linux isolation modes. It explicitly rejects:
+[EXPERIMENTAL] On macOS and Windows, selecting `BUILD_ROOT OCI <ref>` now routes the package through a local Linux provider instead of trying to emulate Linux isolation in the host-native backend:
+
+- Windows: WSL2
+- macOS: a direct Apple Virtualization helper and Linux guest
+
+On macOS and Windows, `depos` still explicitly rejects:
 
 - `BUILD_ROOT SCRATCH`
-- `BUILD_ROOT OCI <ref>`
-- `TOOLCHAIN ROOTFS`
-- `BUILD_ARCH != TARGET_ARCH`
+- `TOOLCHAIN ROOTFS` without `BUILD_ROOT OCI <ref>`
+- `BUILD_ARCH != TARGET_ARCH` without `BUILD_ROOT OCI <ref>`
 
-That restriction should stay visible in the docs and READMEs so people do not assume Linux runtime semantics exist everywhere.
+That restriction should stay visible in the docs and READMEs so people do not assume Linux runtime semantics exist everywhere or that the local Linux-provider path is already shipping-grade.
 
 ## Choosing A Mode
 

@@ -41,6 +41,14 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Set up WSL
+        if: runner.os == 'Windows'
+        uses: Vampire/setup-wsl@v6
+        with:
+          distribution: Ubuntu-24.04
+          set-as-default: true
+          use-cache: false
+
       - name: Rust tests (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -54,6 +62,10 @@ jobs:
       - name: Rust tests (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          DEPOS_TEST_LINUX_PROVIDER: "1"
+          DEPOS_SOURCE_REPO: ${{ github.workspace }}
+          DEPOS_WSL_DISTRO: Ubuntu-24.04
         run: cargo test --locked --manifest-path cli/Cargo.toml -j $env:NUMBER_OF_PROCESSORS
 
       - name: Cargo fmt
