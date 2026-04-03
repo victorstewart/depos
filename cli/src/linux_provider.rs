@@ -624,6 +624,10 @@ SUDO=
 if [ "$(id -u)" -ne 0 ]; then
   SUDO=sudo
 fi
+$SUDO mkdir -p /proc/sys/fs/binfmt_misc
+if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
+  $SUDO mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc || true
+fi
 $SUDO mkdir -p {runtime_root}
 if [ ! -f {bootstrap_stamp} ]; then
   echo "provider bootstrap: cold"
