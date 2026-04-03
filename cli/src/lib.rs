@@ -2289,6 +2289,11 @@ fn build_command_environment(
             )
         })
         .collect::<Vec<_>>();
+    let provider_oci_mode = linux_provider_mode_enabled()
+        && matches!(
+            (&spec.build_root, &spec.toolchain),
+            (BuildRoot::Oci(_), ToolchainSource::Rootfs)
+        );
     let path_value = match (&spec.build_root, &spec.toolchain) {
         (BuildRoot::System, ToolchainSource::System) => "/usr/bin:/bin".to_string(),
         (BuildRoot::Scratch, ToolchainSource::System) => {
@@ -2300,9 +2305,19 @@ fn build_command_environment(
         ),
         _ => "/usr/bin:/bin".to_string(),
     };
+    let path_value = if provider_oci_mode {
+        prepend_path_entries(&format!("{PROVIDER_CARGO_HOME_DIR}/bin"), &path_value)
+    } else {
+        path_value
+    };
+    let home_value = if provider_oci_mode {
+        "/root".to_string()
+    } else {
+        CELL_TMP_DIR.to_string()
+    };
     let mut env = vec![
         ("PATH".to_string(), path_value),
-        ("HOME".to_string(), CELL_TMP_DIR.to_string()),
+        ("HOME".to_string(), home_value),
         ("TMPDIR".to_string(), CELL_TMP_DIR.to_string()),
         ("DEPO_SOURCE_DIR".to_string(), CELL_SOURCE_DIR.to_string()),
         ("DEPO_BUILD_DIR".to_string(), CELL_BUILD_DIR.to_string()),
@@ -2353,12 +2368,7 @@ fn build_command_environment(
             ));
         }
     }
-    if linux_provider_mode_enabled()
-        && matches!(
-            (&spec.build_root, &spec.toolchain),
-            (BuildRoot::Oci(_), ToolchainSource::Rootfs)
-        )
-    {
+    if provider_oci_mode {
         env.push((
             "CARGO_HOME".to_string(),
             PROVIDER_CARGO_HOME_DIR.to_string(),
