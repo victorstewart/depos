@@ -52,7 +52,7 @@ Runtime selection happens outside the `DepoFile`:
 - `DEPOS_LINUX_PROVIDER=wsl2` is the explicit Windows provider
 - `DEPOS_LINUX_PROVIDER=mac-local` is the explicit macOS provider
 - `DEPOS_LINUX_PROVIDER_ROOT=/absolute/linux/path` overrides the provider-side runtime root
-- `DEPOS_WSL_DISTRO=<name>` picks the WSL distro for Windows
+- `DEPOS_WSL_DISTRO=<name>` picks the WSL distro for Windows; otherwise auto mode prefers `Ubuntu-24.04` and installs it lazily if no provider distro exists
 - `DEPOS_APPLE_VIRTUALIZATION_HELPER=/absolute/path/to/helper` points macOS at the direct helper
 - `DEPOS_APPLE_VIRTUALIZATION_VM=<name>` overrides the default macOS VM name
 

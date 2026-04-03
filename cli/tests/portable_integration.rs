@@ -406,6 +406,49 @@ fn sync_reuses_wsl_provider_bootstrap_state_across_oci_builds() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn sync_records_auto_wsl_provider_metadata_without_explicit_distro() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let provider_root = unique_provider_root("auto-metadata");
+    let archive = sandbox.create_source_archive(
+        "upstreams/provider_auto_metadata_demo",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+    let result = with_env_vars(
+        &[
+            ("DEPOS_LINUX_PROVIDER", Some("auto")),
+            ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
+            ("DEPOS_WSL_DISTRO", None),
+        ],
+        || {
+            sync_with_depofile(
+                &sandbox,
+                "provider_auto_metadata_demo",
+                &provider_header_depofile(
+                    "provider_auto_metadata_demo",
+                    &portable_file_url(&archive),
+                ),
+            )
+        },
+    );
+    result.expect("provider auto mode should pick an installed or lazily installed WSL distro");
+
+    let distro = auto_wsl_distro_for_test();
+    let metadata = read_wsl_text_file(&distro, &format!("{provider_root}/provider-metadata.env"));
+    assert!(
+        metadata.contains("provider_kind=wsl2"),
+        "expected WSL provider metadata, got:\n{metadata}"
+    );
+    assert!(
+        metadata.contains(&format!("provider_identity={distro}")),
+        "expected provider identity in metadata, got:\n{metadata}"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn sync_records_wsl_provider_metadata_under_runtime_root() {
     if !linux_provider_tests_enabled() {
         return;
@@ -911,6 +954,41 @@ fn wsl_distro_for_test() -> String {
         .find(|line| !line.is_empty())
         .map(str::to_owned)
         .expect("expected at least one installed WSL distribution")
+}
+
+#[cfg(target_os = "windows")]
+fn auto_wsl_distro_for_test() -> String {
+    let installed = installed_wsl_distros_for_test();
+    if installed
+        .iter()
+        .any(|installed| installed == "Ubuntu-24.04")
+    {
+        return "Ubuntu-24.04".to_string();
+    }
+    installed
+        .into_iter()
+        .next()
+        .expect("expected at least one installed WSL distribution")
+}
+
+#[cfg(target_os = "windows")]
+fn installed_wsl_distros_for_test() -> Vec<String> {
+    let output = Command::new("wsl.exe")
+        .args(["--list", "--quiet"])
+        .output()
+        .expect("query WSL distributions");
+    assert!(
+        output.status.success(),
+        "wsl.exe --list --quiet failed: stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(target_os = "windows")]

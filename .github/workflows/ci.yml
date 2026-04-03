@@ -65,7 +65,6 @@ jobs:
         env:
           DEPOS_TEST_LINUX_PROVIDER: "1"
           DEPOS_SOURCE_REPO: ${{ github.workspace }}
-          DEPOS_WSL_DISTRO: Ubuntu-24.04
         run: cargo test --locked --manifest-path cli/Cargo.toml -j $env:NUMBER_OF_PROCESSORS
 
       - name: Cargo fmt

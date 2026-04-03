@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Debug)]
 enum ProviderKind {
     #[cfg(target_os = "windows")]
-    Wsl { distro: String },
+    Wsl { distro: String, auto_install: bool },
     #[cfg(target_os = "macos")]
     AppleVirtualization { helper: PathBuf, vm_name: String },
 }
@@ -53,6 +53,8 @@ struct ProviderJob {
 
 const PROVIDER_RUNTIME_LAYOUT_VERSION: &str = "v1";
 const PROVIDER_BOOTSTRAP_VERSION: &str = "v1";
+#[cfg(target_os = "windows")]
+const DEFAULT_WSL_DISTRO: &str = "Ubuntu-24.04";
 
 pub(crate) fn execute_linux_provider_command_pipeline(
     depos_root: &Path,
@@ -160,9 +162,12 @@ impl LinuxProvider {
                     "DEPOS_LINUX_PROVIDER=mac-local is not supported on Windows; use auto or wsl2"
                 );
             }
-            let distro = detect_wsl_distro()?;
+            let (distro, auto_install) = detect_wsl_distro()?;
             return Ok(Self {
-                kind: ProviderKind::Wsl { distro },
+                kind: ProviderKind::Wsl {
+                    distro,
+                    auto_install,
+                },
                 runtime_root,
                 cache_root,
                 metadata_path,
@@ -281,10 +286,48 @@ impl LinuxProvider {
     fn ensure_available(&self, log: &mut String) -> Result<()> {
         match &self.kind {
             #[cfg(target_os = "windows")]
-            ProviderKind::Wsl { distro } => {
+            ProviderKind::Wsl {
+                distro,
+                auto_install,
+            } => {
+                let installed = installed_wsl_distros()?;
+                if !installed.iter().any(|installed| installed == distro) {
+                    if !*auto_install {
+                        bail!(
+                            "WSL distro '{}' was not installed; install/configure WSL and set DEPOS_WSL_DISTRO if needed",
+                            distro
+                        );
+                    }
+                    self.run_host_command(
+                        "wsl.exe",
+                        [
+                            "--install",
+                            "--distribution",
+                            distro.as_str(),
+                            "--no-launch",
+                            "--web-download",
+                        ],
+                        log,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to install WSL distro '{}'; install/configure WSL and set DEPOS_WSL_DISTRO if needed",
+                            distro
+                        )
+                    })?;
+                }
                 self.run_host_command(
                     "wsl.exe",
-                    ["-d", distro.as_str(), "--", "bash", "-lc", "true"],
+                    [
+                        "--distribution",
+                        distro.as_str(),
+                        "--user",
+                        "root",
+                        "--",
+                        "bash",
+                        "-lc",
+                        "true",
+                    ],
                     log,
                 )
                 .with_context(|| {
@@ -450,9 +493,18 @@ impl LinuxProvider {
     fn spawn_shell(&self, script: &str) -> Result<Command> {
         match &self.kind {
             #[cfg(target_os = "windows")]
-            ProviderKind::Wsl { distro } => {
+            ProviderKind::Wsl { distro, .. } => {
                 let mut command = Command::new("wsl.exe");
-                command.args(["-d", distro, "--", "bash", "-lc", script]);
+                command.args([
+                    "--distribution",
+                    distro,
+                    "--user",
+                    "root",
+                    "--",
+                    "bash",
+                    "-lc",
+                    script,
+                ]);
                 Ok(command)
             }
             #[cfg(target_os = "macos")]
@@ -546,7 +598,7 @@ impl LinuxProvider {
 fn provider_metadata_contents(provider: &LinuxProvider) -> String {
     let (kind, identity) = match &provider.kind {
         #[cfg(target_os = "windows")]
-        ProviderKind::Wsl { distro } => ("wsl2", distro.as_str()),
+        ProviderKind::Wsl { distro, .. } => ("wsl2", distro.as_str()),
         #[cfg(target_os = "macos")]
         ProviderKind::AppleVirtualization { vm_name, .. } => ("mac-local", vm_name.as_str()),
     };
@@ -746,12 +798,29 @@ fn shell_quote(value: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn detect_wsl_distro() -> Result<String> {
+fn detect_wsl_distro() -> Result<(String, bool)> {
     if let Ok(explicit) = std::env::var("DEPOS_WSL_DISTRO") {
-        if !explicit.trim().is_empty() {
-            return Ok(explicit);
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return Ok((trimmed.to_string(), false));
         }
     }
+
+    let installed = installed_wsl_distros()?;
+    if installed
+        .iter()
+        .any(|installed| installed == DEFAULT_WSL_DISTRO)
+    {
+        return Ok((DEFAULT_WSL_DISTRO.to_string(), true));
+    }
+    if let Some(first) = installed.into_iter().next() {
+        return Ok((first, false));
+    }
+    Ok((DEFAULT_WSL_DISTRO.to_string(), true))
+}
+
+#[cfg(target_os = "windows")]
+fn installed_wsl_distros() -> Result<Vec<String>> {
     let output = Command::new("wsl.exe")
         .args(["--list", "--quiet"])
         .output()
@@ -762,13 +831,10 @@ fn detect_wsl_distro() -> Result<String> {
             output.status
         );
     }
-    let listing = String::from_utf8_lossy(&output.stdout);
-    listing
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
+        .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            anyhow!("no WSL distributions were installed; install one or set DEPOS_WSL_DISTRO")
-        })
+        .collect())
 }

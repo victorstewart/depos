@@ -64,7 +64,7 @@ On macOS and Windows, `BUILD_ROOT OCI <image>` enters the local Linux-provider p
 - `DEPOS_LINUX_PROVIDER=wsl2` forces the Windows WSL2 provider
 - `DEPOS_LINUX_PROVIDER=mac-local` forces the macOS direct-helper path
 - `DEPOS_LINUX_PROVIDER_ROOT=/absolute/linux/path` overrides the provider-side runtime root
-- `DEPOS_WSL_DISTRO=<name>` selects the WSL distro when `wsl2` is active
+- `DEPOS_WSL_DISTRO=<name>` selects the WSL distro when `wsl2` is active; otherwise Windows auto mode prefers `Ubuntu-24.04` and installs it lazily if needed
 - `DEPOS_APPLE_VIRTUALIZATION_HELPER=/absolute/path/to/helper` points macOS at the direct helper executable
 - `DEPOS_APPLE_VIRTUALIZATION_VM=<name>` overrides the default macOS VM name
 

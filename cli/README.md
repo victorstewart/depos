@@ -48,7 +48,7 @@ Runtime selection is explicit at the bootstrap layer, not in `DepoFile` syntax:
 - `DEPOS_LINUX_PROVIDER=wsl2` forces the Windows WSL2 path
 - `DEPOS_LINUX_PROVIDER=mac-local` forces the macOS Apple-Virtualization-backed path
 - `DEPOS_LINUX_PROVIDER_ROOT=/absolute/linux/path` overrides the provider-side runtime root
-- `DEPOS_WSL_DISTRO=<name>` selects the WSL distro when using `wsl2`
+- `DEPOS_WSL_DISTRO=<name>` selects the WSL distro when using `wsl2`; without it, Windows auto mode prefers `Ubuntu-24.04` and installs it lazily if no provider distro exists
 - `DEPOS_APPLE_VIRTUALIZATION_HELPER=/absolute/path/to/helper` points `depos` at the direct macOS helper
 - `DEPOS_APPLE_VIRTUALIZATION_VM=<name>` overrides the default macOS VM name
 

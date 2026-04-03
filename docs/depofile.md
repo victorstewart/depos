@@ -85,6 +85,8 @@ Provider selection stays in runtime configuration rather than the recipe:
 - `DEPOS_LINUX_PROVIDER=mac-local`
 - `DEPOS_LINUX_PROVIDER_ROOT=/absolute/linux/path`
 
+On Windows, `DEPOS_LINUX_PROVIDER=auto` prefers a local `Ubuntu-24.04` WSL provider and installs it lazily when no provider distro exists. Set `DEPOS_WSL_DISTRO=<name>` to force a different WSL distro.
+
 `DepoFile`s are trusted inputs. `depos` is not a hostile-code sandbox.
 
 ## Real Examples In This Repo
