@@ -279,15 +279,19 @@ fn sync_builds_linux_oci_package_with_provider_when_enabled() {
         "upstreams/linux_provider_demo",
         &[("payload/demo.h", "#pragma once\n")],
     );
-    sync_with_depofile(
+    expect_sync_success(
         &sandbox,
         package_name,
-        &format!(
-            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/demo.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n",
-            portable_file_url(&archive)
+        sync_with_depofile(
+            &sandbox,
+            package_name,
+            &format!(
+                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/demo.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n",
+                portable_file_url(&archive)
+            ),
         ),
-    )
-    .expect("BUILD_ROOT OCI should route through the Linux provider");
+        "BUILD_ROOT OCI should route through the Linux provider",
+    );
 
     assert!(sandbox
         .package_store_path_for_target_arch(
@@ -322,15 +326,19 @@ fn sync_builds_linux_oci_cargo_binary_with_provider_when_enabled() {
             ),
         ],
     );
-    sync_with_depofile(
+    expect_sync_success(
         &sandbox,
         package_name,
-        &format!(
-            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM CARGO\nSTAGE_FILE BUILD cargo-target/release/{package_name} bin/{package_name}\nARTIFACT bin/{package_name}\n",
-            portable_file_url(&archive)
+        sync_with_depofile(
+            &sandbox,
+            package_name,
+            &format!(
+                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM CARGO\nSTAGE_FILE BUILD cargo-target/release/{package_name} bin/{package_name}\nARTIFACT bin/{package_name}\n",
+                portable_file_url(&archive)
+            ),
         ),
-    )
-    .expect("provider-backed OCI build should produce a Linux cargo binary");
+        "provider-backed OCI build should produce a Linux cargo binary",
+    );
 
     assert!(sandbox
         .package_store_path_for_target_arch(
@@ -362,15 +370,19 @@ fn sync_builds_linux_oci_cmake_binary_with_provider_when_enabled() {
             ("src/main.c", "int main(void) {\n    return 0;\n}\n"),
         ],
     );
-    sync_with_depofile(
+    expect_sync_success(
         &sandbox,
         package_name,
-        &format!(
-            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM CMAKE\nARTIFACT bin/{package_name}\n",
-            portable_file_url(&archive),
+        sync_with_depofile(
+            &sandbox,
+            package_name,
+            &format!(
+                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM CMAKE\nARTIFACT bin/{package_name}\n",
+                portable_file_url(&archive),
+            ),
         ),
-    )
-    .expect("provider-backed OCI build should produce a Linux CMake binary");
+        "provider-backed OCI build should produce a Linux CMake binary",
+    );
 
     assert!(sandbox
         .package_store_path_for_target_arch(
@@ -396,45 +408,53 @@ fn sync_reuses_wsl_provider_bootstrap_state_across_oci_builds() {
         "upstreams/provider_reuse_first",
         &[("payload/demo.h", "#pragma once\n")],
     );
-    with_env_vars(
-        &[
-            ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
-            ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
-        ],
-        || {
-            sync_with_depofile(
-                &sandbox,
-                "provider_reuse_first",
-                &provider_header_depofile(
+    expect_sync_success(
+        &sandbox,
+        "provider_reuse_first",
+        with_env_vars(
+            &[
+                ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
+                ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
+            ],
+            || {
+                sync_with_depofile(
+                    &sandbox,
                     "provider_reuse_first",
-                    &portable_file_url(&first_archive),
-                ),
-            )
-        },
-    )
-    .expect("first OCI build should cold-bootstrap the provider");
+                    &provider_header_depofile(
+                        "provider_reuse_first",
+                        &portable_file_url(&first_archive),
+                    ),
+                )
+            },
+        ),
+        "first OCI build should cold-bootstrap the provider",
+    );
 
     let second_archive = sandbox.create_source_archive(
         "upstreams/provider_reuse_second",
         &[("payload/demo.h", "#pragma once\n")],
     );
-    with_env_vars(
-        &[
-            ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
-            ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
-        ],
-        || {
-            sync_with_depofile(
-                &sandbox,
-                "provider_reuse_second",
-                &provider_header_depofile(
+    expect_sync_success(
+        &sandbox,
+        "provider_reuse_second",
+        with_env_vars(
+            &[
+                ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
+                ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
+            ],
+            || {
+                sync_with_depofile(
+                    &sandbox,
                     "provider_reuse_second",
-                    &portable_file_url(&second_archive),
-                ),
-            )
-        },
-    )
-    .expect("second OCI build should reuse the provider bootstrap");
+                    &provider_header_depofile(
+                        "provider_reuse_second",
+                        &portable_file_url(&second_archive),
+                    ),
+                )
+            },
+        ),
+        "second OCI build should reuse the provider bootstrap",
+    );
 
     let second_log =
         sandbox.read_materialization_log("provider_reuse_second", RELEASE_NAMESPACE, "1.0.0");
@@ -473,7 +493,12 @@ fn sync_records_auto_wsl_provider_metadata_without_explicit_distro() {
             )
         },
     );
-    result.expect("provider auto mode should pick an installed or lazily installed WSL distro");
+    expect_sync_success(
+        &sandbox,
+        "provider_auto_metadata_demo",
+        result,
+        "provider auto mode should pick an installed or lazily installed WSL distro",
+    );
 
     let distro = auto_wsl_distro_for_test();
     let metadata = read_wsl_text_file(&distro, &format!("{provider_root}/provider-metadata.env"));
@@ -501,21 +526,28 @@ fn sync_records_wsl_provider_metadata_under_runtime_root() {
         &[("payload/demo.h", "#pragma once\n")],
     );
 
-    with_env_vars(
-        &[
-            ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
-            ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
-            ("DEPOS_WSL_DISTRO", Some(&distro)),
-        ],
-        || {
-            sync_with_depofile(
-                &sandbox,
-                "provider_metadata_demo",
-                &provider_header_depofile("provider_metadata_demo", &portable_file_url(&archive)),
-            )
-        },
-    )
-    .expect("provider-backed OCI build should record provider metadata");
+    expect_sync_success(
+        &sandbox,
+        "provider_metadata_demo",
+        with_env_vars(
+            &[
+                ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
+                ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
+                ("DEPOS_WSL_DISTRO", Some(&distro)),
+            ],
+            || {
+                sync_with_depofile(
+                    &sandbox,
+                    "provider_metadata_demo",
+                    &provider_header_depofile(
+                        "provider_metadata_demo",
+                        &portable_file_url(&archive),
+                    ),
+                )
+            },
+        ),
+        "provider-backed OCI build should record provider metadata",
+    );
 
     let metadata = read_wsl_text_file(&distro, &format!("{provider_root}/provider-metadata.env"));
     assert!(
@@ -709,17 +741,21 @@ fn sync_builds_cross_target_linux_oci_package_with_provider_when_enabled() {
             "// cross target\n",
         )],
     );
-    sync_with_depofile(
+    expect_sync_success(
         &sandbox,
         package_name,
-        &format!(
-            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/${{DEPO_BUILD_ARCH}}-to-${{DEPO_TARGET_ARCH}}.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n",
-            portable_file_url(&archive),
-            host_arch(),
-            foreign_arch(),
+        sync_with_depofile(
+            &sandbox,
+            package_name,
+            &format!(
+                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/${{DEPO_BUILD_ARCH}}-to-${{DEPO_TARGET_ARCH}}.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n",
+                portable_file_url(&archive),
+                host_arch(),
+                foreign_arch(),
+            ),
         ),
-    )
-    .expect("cross-target BUILD_ROOT OCI should route through the Linux provider");
+        "cross-target BUILD_ROOT OCI should route through the Linux provider",
+    );
 
     assert!(sandbox
         .package_store_path_for_target_arch(
@@ -756,17 +792,21 @@ fn sync_builds_cross_target_linux_oci_cargo_binary_with_provider_when_enabled() 
             ),
         ],
     );
-    sync_with_depofile(
+    expect_sync_success(
         &sandbox,
         package_name,
-        &format!(
-            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM CARGO\nSTAGE_FILE BUILD cargo-target/{target_triple}/release/{package_name} bin/{package_name}\nARTIFACT bin/{package_name}\n",
-            portable_file_url(&archive),
-            host_arch(),
-            target_arch,
+        sync_with_depofile(
+            &sandbox,
+            package_name,
+            &format!(
+                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM CARGO\nSTAGE_FILE BUILD cargo-target/{target_triple}/release/{package_name} bin/{package_name}\nARTIFACT bin/{package_name}\n",
+                portable_file_url(&archive),
+                host_arch(),
+                target_arch,
+            ),
         ),
-    )
-    .expect("provider-backed OCI build should cross-compile a Linux cargo binary");
+        "provider-backed OCI build should cross-compile a Linux cargo binary",
+    );
 
     assert!(sandbox
         .package_store_path_for_target_arch(
@@ -799,19 +839,23 @@ fn sync_builds_cross_target_linux_oci_cmake_binary_with_provider_when_enabled() 
             ("src/main.c", "int main(void) {\n    return 0;\n}\n"),
         ],
     );
-    sync_with_depofile(
+    expect_sync_success(
         &sandbox,
         package_name,
-        &format!(
-            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM CMAKE\nCMAKE_INSTALL_SH <<'EOF'\ncmake --install \"${{DEPO_BUILD_DIR}}\"\n{}-readelf -h \"${{DEPO_PREFIX}}/bin/{package_name}\" > \"${{DEPO_BUILD_DIR}}/arch.txt\"\ngrep -F {} \"${{DEPO_BUILD_DIR}}/arch.txt\"\nEOF\nSTAGE_FILE BUILD arch.txt share/{package_name}/arch.txt\nARTIFACT bin/{package_name}\n",
-            portable_file_url(&archive),
-            host_arch(),
-            target_arch,
-            linux_toolchain_prefix(target_arch),
-            shell_single_quote(cross_readelf_machine_pattern(target_arch)),
+        sync_with_depofile(
+            &sandbox,
+            package_name,
+            &format!(
+                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM CMAKE\nCMAKE_INSTALL_SH <<'EOF'\ncmake --install \"${{DEPO_BUILD_DIR}}\"\n{}-readelf -h \"${{DEPO_PREFIX}}/bin/{package_name}\" > \"${{DEPO_BUILD_DIR}}/arch.txt\"\ngrep -F {} \"${{DEPO_BUILD_DIR}}/arch.txt\"\nEOF\nSTAGE_FILE BUILD arch.txt share/{package_name}/arch.txt\nARTIFACT bin/{package_name}\n",
+                portable_file_url(&archive),
+                host_arch(),
+                target_arch,
+                linux_toolchain_prefix(target_arch),
+                shell_single_quote(cross_readelf_machine_pattern(target_arch)),
+            ),
         ),
-    )
-    .expect("provider-backed OCI build should cross-compile a Linux CMake binary");
+        "provider-backed OCI build should cross-compile a Linux CMake binary",
+    );
 
     assert!(sandbox
         .package_store_path_for_target_arch(
@@ -889,14 +933,19 @@ fn sync_executes_cross_target_linux_binary_with_provider_when_enabled() {
         &format!("depos_require({package_name} VERSION 1.0.0)\n"),
     );
 
-    sync_registry(&SyncOptions {
-        depos_root: sandbox.depos_root(),
-        manifest: sandbox
-            .depos_root()
-            .join(format!("manifests/{package_name}.cmake")),
-        executable: None,
-    })
-    .expect("provider-backed OCI build should execute the foreign target binary dependency");
+    expect_sync_success(
+        &sandbox,
+        package_name,
+        sync_registry(&SyncOptions {
+            depos_root: sandbox.depos_root(),
+            manifest: sandbox
+                .depos_root()
+                .join(format!("manifests/{package_name}.cmake")),
+            executable: None,
+        })
+        .map(|_| ()),
+        "provider-backed OCI build should execute the foreign target binary dependency",
+    );
 
     assert!(sandbox
         .package_store_path_for_target_arch(
@@ -936,6 +985,24 @@ fn sync_with_depofile(sandbox: &Sandbox, name: &str, depofile: &str) -> anyhow::
         executable: None,
     })?;
     Ok(())
+}
+
+fn expect_sync_success(sandbox: &Sandbox, name: &str, result: anyhow::Result<()>, context: &str) {
+    if let Err(error) = result {
+        let mut detail = error
+            .chain()
+            .map(|cause| cause.to_string())
+            .collect::<Vec<_>>()
+            .join(" | caused by: ");
+        if let Ok(log_tail) = sandbox.materialization_log_tail(name, RELEASE_NAMESPACE, "1.0.0", 80)
+        {
+            if !log_tail.is_empty() {
+                detail.push_str(" | materialization log tail: ");
+                detail.push_str(&log_tail.replace('\r', " ").replace('\n', " \\n "));
+            }
+        }
+        panic!("{context}: {detail}");
+    }
 }
 
 fn static_library_file_name(name: &str) -> String {
@@ -1184,6 +1251,26 @@ impl Sandbox {
                 .join(format!("{version}.log")),
         )
         .expect("read materialization log")
+    }
+
+    fn materialization_log_tail(
+        &self,
+        name: &str,
+        namespace: &str,
+        version: &str,
+        tail_lines: usize,
+    ) -> std::io::Result<String> {
+        let path = self
+            .depos_root()
+            .join(".run")
+            .join("logs")
+            .join(name)
+            .join(namespace)
+            .join(format!("{version}.log"));
+        let contents = fs::read_to_string(path)?;
+        let all_lines = contents.lines().collect::<Vec<_>>();
+        let start = all_lines.len().saturating_sub(tail_lines);
+        Ok(all_lines[start..].join("\n"))
     }
 
     fn write(&self, relative: &str, contents: &str) {
