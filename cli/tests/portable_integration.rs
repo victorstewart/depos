@@ -854,7 +854,7 @@ fn sync_builds_cross_target_linux_oci_cmake_binary_with_provider_when_enabled() 
             &sandbox,
             package_name,
             &format!(
-                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM CMAKE\nCMAKE_INSTALL_SH <<'EOF'\ncmake --install \"${{DEPO_BUILD_DIR}}\"\n{}-readelf -h \"${{DEPO_PREFIX}}/bin/{package_name}\" > \"${{DEPO_BUILD_DIR}}/arch.txt\"\ngrep -F {} \"${{DEPO_BUILD_DIR}}/arch.txt\"\nEOF\nSTAGE_FILE BUILD arch.txt share/{package_name}/arch.txt\nARTIFACT bin/{package_name}\n",
+                "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM CMAKE\nCMAKE_INSTALL_SH <<'EOF'\ncmake --install \"${{DEPO_BUILD_DIR}}\"\n{}-readelf -h \"${{DEPO_PREFIX}}/bin/{package_name}\" > \"${{DEPO_BUILD_DIR}}/arch.txt\"\ngrep -F {} \"${{DEPO_BUILD_DIR}}/arch.txt\"\nEOF\nSTAGE_FILE BUILD arch.txt share/{package_name}/arch.txt\nARTIFACT bin/{package_name}\nARTIFACT share/{package_name}/arch.txt\n",
                 portable_file_url(&archive),
                 host_arch(),
                 target_arch,
