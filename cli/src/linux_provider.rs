@@ -36,6 +36,7 @@ struct LinuxProvider {
     kind: ProviderKind,
     runtime_root: String,
     cache_root: String,
+    metadata_path: String,
     repo_parent: String,
     repo_root: String,
     target_root: String,
@@ -146,6 +147,7 @@ impl LinuxProvider {
         let source_repo = provider_source_repo()?;
         let runtime_root = configured_provider_runtime_root(&source_repo)?;
         let cache_root = format!("{runtime_root}/toolchain-cache");
+        let metadata_path = format!("{runtime_root}/provider-metadata.env");
         let repo_parent = format!("{runtime_root}/repo-source");
         let source_root = source_repo;
         let repo_root = format!("{repo_parent}/{}", file_name_string(&source_root)?);
@@ -163,6 +165,7 @@ impl LinuxProvider {
                 kind: ProviderKind::Wsl { distro },
                 runtime_root,
                 cache_root,
+                metadata_path,
                 repo_parent,
                 repo_root,
                 target_root,
@@ -193,6 +196,7 @@ impl LinuxProvider {
                 kind: ProviderKind::AppleVirtualization { helper, vm_name },
                 runtime_root,
                 cache_root,
+                metadata_path,
                 repo_parent,
                 repo_root,
                 target_root,
@@ -244,6 +248,7 @@ impl LinuxProvider {
             ),
             log,
         )?;
+        self.write_metadata(log)?;
         self.run_shell(&format!("rm -rf {}", shell_quote(&self.repo_root)), log)?;
         self.push_path(repo_root, &self.repo_parent, log)?;
         self.run_shell(
@@ -312,6 +317,16 @@ impl LinuxProvider {
             }
         }
         Ok(())
+    }
+
+    fn write_metadata(&self, log: &mut String) -> Result<()> {
+        let metadata = provider_metadata_contents(self);
+        let script = format!(
+            "cat > {path} <<'EOF'\n{metadata}EOF\n",
+            path = shell_quote(&self.metadata_path),
+            metadata = metadata
+        );
+        self.run_shell(&script, log)
     }
 
     fn run_shell(&self, script: &str, log: &mut String) -> Result<()> {
@@ -526,6 +541,25 @@ impl LinuxProvider {
         append_process_output(log, &output.stdout, &output.stderr);
         Ok(output)
     }
+}
+
+fn provider_metadata_contents(provider: &LinuxProvider) -> String {
+    let (kind, identity) = match &provider.kind {
+        #[cfg(target_os = "windows")]
+        ProviderKind::Wsl { distro } => ("wsl2", distro.as_str()),
+        #[cfg(target_os = "macos")]
+        ProviderKind::AppleVirtualization { vm_name, .. } => ("mac-local", vm_name.as_str()),
+    };
+    format!(
+        "provider_kind={kind}\nprovider_identity={identity}\nruntime_root={runtime_root}\nruntime_layout_version={layout_version}\nbootstrap_version={bootstrap_version}\nbootstrap_stamp={bootstrap_stamp}\n",
+        runtime_root = provider.runtime_root,
+        layout_version = PROVIDER_RUNTIME_LAYOUT_VERSION,
+        bootstrap_version = PROVIDER_BOOTSTRAP_VERSION,
+        bootstrap_stamp = format!(
+            "{}/bootstrap-{}.stamp",
+            provider.runtime_root, PROVIDER_BOOTSTRAP_VERSION
+        ),
+    )
 }
 
 fn pipe_commands(

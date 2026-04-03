@@ -56,6 +56,8 @@ Runtime selection happens outside the `DepoFile`:
 - `DEPOS_APPLE_VIRTUALIZATION_HELPER=/absolute/path/to/helper` points macOS at the direct helper
 - `DEPOS_APPLE_VIRTUALIZATION_VM=<name>` overrides the default macOS VM name
 
+When the provider runtime root is initialized, `depos` records `provider-metadata.env` there alongside the versioned bootstrap stamp and caches so warm-path diagnostics stay inspectable inside the Linux provider.
+
 On macOS and Windows, `depos` still explicitly rejects:
 
 - `BUILD_ROOT SCRATCH`

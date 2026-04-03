@@ -68,6 +68,8 @@ On macOS and Windows, `BUILD_ROOT OCI <image>` enters the local Linux-provider p
 - `DEPOS_APPLE_VIRTUALIZATION_HELPER=/absolute/path/to/helper` points macOS at the direct helper executable
 - `DEPOS_APPLE_VIRTUALIZATION_VM=<name>` overrides the default macOS VM name
 
+The provider runtime root keeps `provider-metadata.env` plus versioned bootstrap state and caches so the Linux-side runtime can be inspected directly.
+
 On macOS and Windows, `depos` still rejects Linux-only advanced requests without `BUILD_ROOT OCI <image>`.
 
 ## Resolution Order In CMake

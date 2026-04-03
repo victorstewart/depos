@@ -404,6 +404,65 @@ fn sync_reuses_wsl_provider_bootstrap_state_across_oci_builds() {
     );
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn sync_records_wsl_provider_metadata_under_runtime_root() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let provider_root = unique_provider_root("metadata");
+    let distro = wsl_distro_for_test();
+    let archive = sandbox.create_source_archive(
+        "upstreams/provider_metadata_demo",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+
+    with_env_vars(
+        &[
+            ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
+            ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
+            ("DEPOS_WSL_DISTRO", Some(&distro)),
+        ],
+        || {
+            sync_with_depofile(
+                &sandbox,
+                "provider_metadata_demo",
+                &provider_header_depofile("provider_metadata_demo", &portable_file_url(&archive)),
+            )
+        },
+    )
+    .expect("provider-backed OCI build should record provider metadata");
+
+    let metadata = read_wsl_text_file(&distro, &format!("{provider_root}/provider-metadata.env"));
+    assert!(
+        metadata.contains("provider_kind=wsl2"),
+        "expected WSL provider metadata, got:\n{metadata}"
+    );
+    assert!(
+        metadata.contains(&format!("provider_identity={distro}")),
+        "expected provider identity in metadata, got:\n{metadata}"
+    );
+    assert!(
+        metadata.contains(&format!("runtime_root={provider_root}")),
+        "expected runtime root in metadata, got:\n{metadata}"
+    );
+    assert!(
+        metadata.contains("runtime_layout_version=v1"),
+        "expected runtime layout version in metadata, got:\n{metadata}"
+    );
+    assert!(
+        metadata.contains("bootstrap_version=v1"),
+        "expected bootstrap version in metadata, got:\n{metadata}"
+    );
+    assert!(
+        metadata.contains(&format!(
+            "bootstrap_stamp={provider_root}/bootstrap-v1.stamp"
+        )),
+        "expected bootstrap stamp in metadata, got:\n{metadata}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn sync_reports_missing_direct_apple_virtualization_helper_for_oci_requests() {
@@ -718,6 +777,60 @@ fn unique_provider_root(label: &str) -> String {
             .expect("system time")
             .as_nanos()
     )
+}
+
+#[cfg(target_os = "windows")]
+fn read_wsl_text_file(distro: &str, path: &str) -> String {
+    let output = Command::new("wsl.exe")
+        .args([
+            "-d",
+            distro,
+            "--",
+            "bash",
+            "-lc",
+            &format!("cat {}", bash_quote(path)),
+        ])
+        .output()
+        .expect("spawn wsl.exe");
+    assert!(
+        output.status.success(),
+        "wsl.exe failed reading {path}: stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n")
+}
+
+#[cfg(target_os = "windows")]
+fn wsl_distro_for_test() -> String {
+    if let Ok(explicit) = std::env::var("DEPOS_WSL_DISTRO") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let output = Command::new("wsl.exe")
+        .args(["--list", "--quiet"])
+        .output()
+        .expect("query WSL distributions");
+    assert!(
+        output.status.success(),
+        "wsl.exe --list --quiet failed: stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+        .expect("expected at least one installed WSL distribution")
+}
+
+#[cfg(target_os = "windows")]
+fn bash_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 fn provider_header_depofile(package_name: &str, source_url: &str) -> String {

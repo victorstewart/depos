@@ -52,6 +52,8 @@ Runtime selection is explicit at the bootstrap layer, not in `DepoFile` syntax:
 - `DEPOS_APPLE_VIRTUALIZATION_HELPER=/absolute/path/to/helper` points `depos` at the direct macOS helper
 - `DEPOS_APPLE_VIRTUALIZATION_VM=<name>` overrides the default macOS VM name
 
+The provider runtime root now keeps `provider-metadata.env` plus versioned bootstrap state and caches so you can inspect the Linux-side runtime directly.
+
 ## Docs
 
 - [Landing page](../README.md)
