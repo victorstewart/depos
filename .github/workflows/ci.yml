@@ -90,11 +90,44 @@ jobs:
           DEPOS_SOURCE_REPO: ${{ github.workspace }}
         run: |
           $log = Join-Path $env:TEMP "depos-windows-rust-tests.log"
-          & cargo test --locked --manifest-path cli/Cargo.toml -j $env:NUMBER_OF_PROCESSORS 2>&1 | Tee-Object -FilePath $log
-          $exitCode = $LASTEXITCODE
+          if (Test-Path $log) {
+            Remove-Item $log -Force
+          }
+          $manifest = (Resolve-Path "cli/Cargo.toml").Path.Replace("'", "''")
+          $workspace = (Resolve-Path ".").Path
+          $escapedLog = $log.Replace("'", "''")
+          $command = @"
+& cargo test --locked --manifest-path '$manifest' -j $env:NUMBER_OF_PROCESSORS 2>&1 | Tee-Object -FilePath '$escapedLog'
+exit `$LASTEXITCODE
+"@
+          $proc = Start-Process -FilePath "pwsh" -ArgumentList @("-NoLogo", "-NoProfile", "-Command", $command) -WorkingDirectory $workspace -PassThru
+          $deadline = (Get-Date).AddMinutes(25)
+          $exitCode = $null
+          $lastTail = ""
+          while (-not $proc.HasExited) {
+            Start-Sleep -Seconds 30
+            $proc.Refresh()
+            if (Test-Path $log) {
+              $currentTail = ((Get-Content $log -Tail 20) -join "`n")
+              if ($currentTail -and $currentTail -ne $lastTail) {
+                Write-Host "::notice::Windows cargo test heartbeat"
+                Get-Content $log -Tail 20 | ForEach-Object { Write-Host $_ }
+                $lastTail = $currentTail
+              }
+            }
+            if ((Get-Date) -ge $deadline) {
+              Stop-Process -Id $proc.Id -Force
+              $exitCode = 124
+              Write-Host "::error::Windows cargo test exceeded 25 minutes and was terminated"
+              break
+            }
+          }
+          if ($null -eq $exitCode) {
+            $exitCode = $proc.ExitCode
+          }
           if ($exitCode -ne 0) {
             Write-Host "::error::Windows cargo test failed; recent output follows"
-            $tail = Get-Content $log -Tail 60
+            $tail = if (Test-Path $log) { Get-Content $log -Tail 60 } else { @() }
             $tail | ForEach-Object { Write-Host $_ }
             $chunkSize = 20
             for ($start = 0; $start -lt $tail.Count; $start += $chunkSize) {
@@ -103,7 +136,7 @@ jobs:
               $escaped = $block.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
               Write-Host "::error::Windows cargo test tail [$($start + 1)-$($end + 1)]: $escaped"
             }
-            $lines = Get-Content $log
+            $lines = if (Test-Path $log) { Get-Content $log } else { @() }
             $seen = [System.Collections.Generic.HashSet[string]]::new()
             for ($i = 0; $i -lt $lines.Count; $i++) {
               if ($lines[$i] -notmatch 'panicked at|materialization log tail|caused by:|provider shell command failed|error:') {
