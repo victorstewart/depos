@@ -2092,17 +2092,34 @@ fn prepare_command_emulator(
 ) -> Result<Option<String>> {
     match (&spec.build_root, &spec.toolchain) {
         (BuildRoot::Oci(_), ToolchainSource::Rootfs) => {
-            let emulator = prepare_runtime_emulator(container_root, host_arch, &spec.build_arch)?;
+            let Some(guest_arch) = command_emulator_guest_arch(host_arch, spec)? else {
+                return Ok(None);
+            };
+            let emulator = prepare_runtime_emulator(container_root, host_arch, &guest_arch)?;
             if let Some(emulator_path) = &emulator {
                 log.push_str(&format!(
                     "stage emulator for {} on {}: {}\n",
-                    spec.build_arch, host_arch, emulator_path
+                    guest_arch, host_arch, emulator_path
                 ));
             }
             Ok(emulator)
         }
         _ => Ok(None),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn command_emulator_guest_arch(host_arch: &str, spec: &PackageSpec) -> Result<Option<String>> {
+    let host_arch = normalize_arch_name(host_arch)?;
+    let build_arch = normalize_arch_name(&spec.build_arch)?;
+    if build_arch != host_arch {
+        return Ok(Some(build_arch));
+    }
+    let target_arch = normalize_arch_name(&spec.target_arch)?;
+    if target_arch != host_arch {
+        return Ok(Some(target_arch));
+    }
+    Ok(None)
 }
 
 #[cfg(target_os = "linux")]

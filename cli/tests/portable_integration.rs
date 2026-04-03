@@ -696,6 +696,54 @@ fn sync_builds_cross_target_linux_oci_cargo_binary_with_provider_when_enabled() 
         .is_file());
 }
 
+#[test]
+fn sync_executes_cross_target_linux_binary_with_provider_when_enabled() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let package_name = "linux_provider_cross_run_demo";
+    let target_arch = foreign_arch();
+    let archive = sandbox.create_source_archive(
+        "upstreams/linux_provider_cross_run_demo",
+        &[("payload/placeholder.txt", "cross run\n")],
+    );
+    sync_with_depofile(
+        &sandbox,
+        package_name,
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM MANUAL\nMANUAL_BUILD_SH <<'EOF'\nexport DEBIAN_FRONTEND=noninteractive\napt-get update\napt-get install -y {}\ncat > \"$DEPO_BUILD_DIR/{package_name}.c\" <<'SRC'\n#include <stdio.h>\nint main(void) {{\n    puts(\"linux-provider-cross-run-demo\");\n    return 0;\n}}\nSRC\n{}-gcc -static -o \"$DEPO_BUILD_DIR/{package_name}\" \"$DEPO_BUILD_DIR/{package_name}.c\"\n\"$DEPO_BUILD_DIR/{package_name}\" > \"$DEPO_BUILD_DIR/ran.txt\"\ntest \"$(cat \"$DEPO_BUILD_DIR/ran.txt\")\" = \"linux-provider-cross-run-demo\"\nEOF\nSTAGE_FILE BUILD {package_name} bin/{package_name}\nSTAGE_FILE BUILD ran.txt share/{package_name}/ran.txt\nARTIFACT bin/{package_name}\n",
+            portable_file_url(&archive),
+            host_arch(),
+            target_arch,
+            debian_crossbuild_package_for_test(target_arch),
+            linux_gnu_toolchain_prefix_for_test(target_arch),
+        ),
+    )
+    .expect("provider-backed OCI build should execute the foreign target binary");
+
+    assert_eq!(
+        fs::read_to_string(sandbox.package_store_path_for_target_arch(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            target_arch,
+            &format!("share/{package_name}/ran.txt"),
+        ))
+        .expect("read cross-run proof"),
+        "linux-provider-cross-run-demo\n"
+    );
+    assert!(sandbox
+        .package_store_path_for_target_arch(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            target_arch,
+            &format!("bin/{package_name}"),
+        )
+        .is_file());
+}
+
 fn sync_with_depofile(sandbox: &Sandbox, name: &str, depofile: &str) -> anyhow::Result<()> {
     sandbox.write(
         &format!("depofiles/local/{name}/{RELEASE_NAMESPACE}/1.0.0/main.DepoFile"),
@@ -757,6 +805,24 @@ fn linux_target_triple(arch: &str) -> &'static str {
         "aarch64" => "aarch64-unknown-linux-gnu",
         "riscv64" => "riscv64gc-unknown-linux-gnu",
         other => panic!("unsupported linux target triple arch {other}"),
+    }
+}
+
+fn linux_gnu_toolchain_prefix_for_test(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "x86_64-linux-gnu",
+        "aarch64" => "aarch64-linux-gnu",
+        "riscv64" => "riscv64-linux-gnu",
+        other => panic!("unsupported linux gnu toolchain prefix arch {other}"),
+    }
+}
+
+fn debian_crossbuild_package_for_test(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "crossbuild-essential-amd64",
+        "aarch64" => "crossbuild-essential-arm64",
+        "riscv64" => "crossbuild-essential-riscv64",
+        other => panic!("unsupported debian crossbuild package arch {other}"),
     }
 }
 
