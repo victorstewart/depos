@@ -343,6 +343,46 @@ fn sync_builds_linux_oci_cargo_binary_with_provider_when_enabled() {
         .is_file());
 }
 
+#[test]
+fn sync_builds_linux_oci_cmake_binary_with_provider_when_enabled() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let package_name = "linux_provider_cmake_demo";
+    let archive = sandbox.create_source_archive(
+        "upstreams/linux_provider_cmake_demo",
+        &[
+            (
+                "CMakeLists.txt",
+                &format!(
+                    "cmake_minimum_required(VERSION 3.21)\nproject({package_name} LANGUAGES C)\nadd_executable({package_name} src/main.c)\ninstall(TARGETS {package_name} RUNTIME DESTINATION bin)\n"
+                ),
+            ),
+            ("src/main.c", "int main(void) {\n    return 0;\n}\n"),
+        ],
+    );
+    sync_with_depofile(
+        &sandbox,
+        package_name,
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM CMAKE\nARTIFACT bin/{package_name}\n",
+            portable_file_url(&archive),
+        ),
+    )
+    .expect("provider-backed OCI build should produce a Linux CMake binary");
+
+    assert!(sandbox
+        .package_store_path_for_target_arch(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            host_arch().as_str(),
+            &format!("bin/{package_name}"),
+        )
+        .is_file());
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn sync_reuses_wsl_provider_bootstrap_state_across_oci_builds() {
@@ -740,6 +780,62 @@ fn sync_builds_cross_target_linux_oci_cargo_binary_with_provider_when_enabled() 
 }
 
 #[test]
+fn sync_builds_cross_target_linux_oci_cmake_binary_with_provider_when_enabled() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let package_name = "linux_provider_cross_cmake_demo";
+    let target_arch = foreign_arch();
+    let archive = sandbox.create_source_archive(
+        "upstreams/linux_provider_cross_cmake_demo",
+        &[
+            (
+                "CMakeLists.txt",
+                &format!(
+                    "cmake_minimum_required(VERSION 3.21)\nproject({package_name} LANGUAGES C)\nadd_executable({package_name} src/main.c)\ninstall(TARGETS {package_name} RUNTIME DESTINATION bin)\n"
+                ),
+            ),
+            ("src/main.c", "int main(void) {\n    return 0;\n}\n"),
+        ],
+    );
+    sync_with_depofile(
+        &sandbox,
+        package_name,
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nBUILD_ROOT OCI docker://docker.io/library/ubuntu:24.04\nTOOLCHAIN ROOTFS\nBUILD_ARCH {}\nTARGET_ARCH {}\nBUILD_SYSTEM CMAKE\nCMAKE_INSTALL_SH <<'EOF'\ncmake --install \"${{DEPO_BUILD_DIR}}\"\n{}-readelf -h \"${{DEPO_PREFIX}}/bin/{package_name}\" > \"${{DEPO_BUILD_DIR}}/arch.txt\"\ngrep -F {} \"${{DEPO_BUILD_DIR}}/arch.txt\"\nEOF\nSTAGE_FILE BUILD arch.txt share/{package_name}/arch.txt\nARTIFACT bin/{package_name}\n",
+            portable_file_url(&archive),
+            host_arch(),
+            target_arch,
+            linux_toolchain_prefix(target_arch),
+            shell_single_quote(cross_readelf_machine_pattern(target_arch)),
+        ),
+    )
+    .expect("provider-backed OCI build should cross-compile a Linux CMake binary");
+
+    assert!(sandbox
+        .package_store_path_for_target_arch(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            target_arch,
+            &format!("bin/{package_name}"),
+        )
+        .is_file());
+    assert!(
+        fs::read_to_string(sandbox.package_store_path_for_target_arch(
+            package_name,
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            target_arch,
+            &format!("share/{package_name}/arch.txt"),
+        ))
+        .expect("read cross CMake arch proof")
+        .contains(cross_readelf_machine_pattern(target_arch)),
+    );
+}
+
+#[test]
 fn sync_executes_cross_target_linux_binary_with_provider_when_enabled() {
     if !linux_provider_tests_enabled() {
         return;
@@ -886,6 +982,24 @@ fn linux_target_triple(arch: &str) -> &'static str {
         "aarch64" => "aarch64-unknown-linux-gnu",
         "riscv64" => "riscv64gc-unknown-linux-gnu",
         other => panic!("unsupported linux target triple arch {other}"),
+    }
+}
+
+fn linux_toolchain_prefix(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "x86_64-linux-gnu",
+        "aarch64" => "aarch64-linux-gnu",
+        "riscv64" => "riscv64-linux-gnu",
+        other => panic!("unsupported linux toolchain prefix arch {other}"),
+    }
+}
+
+fn cross_readelf_machine_pattern(arch: &str) -> &'static str {
+    match arch {
+        "x86_64" => "Advanced Micro Devices X86-64",
+        "aarch64" => "AArch64",
+        "riscv64" => "RISC-V",
+        other => panic!("unsupported readelf machine pattern arch {other}"),
     }
 }
 
@@ -1155,6 +1269,11 @@ fn portable_test_lock() -> &'static Mutex<()> {
 fn with_env_vars<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
     let _guard = TestEnvGuard::new(vars);
     f()
+}
+
+fn shell_single_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 struct TestEnvGuard {

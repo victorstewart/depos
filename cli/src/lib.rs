@@ -606,7 +606,6 @@ fn normalize_arch_name(value: &str) -> Result<String> {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 fn linux_gnu_target_triple(arch: &str) -> &'static str {
     match arch {
@@ -617,7 +616,6 @@ fn linux_gnu_target_triple(arch: &str) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 fn linux_gnu_toolchain_prefix(arch: &str) -> &'static str {
     match arch {
@@ -631,7 +629,6 @@ fn linux_gnu_toolchain_prefix(arch: &str) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 fn debian_crossbuild_package(arch: &str) -> &'static str {
     match arch {
@@ -642,7 +639,6 @@ fn debian_crossbuild_package(arch: &str) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 fn cargo_target_env_fragment(triple: &str) -> String {
     triple.replace('-', "_").to_ascii_uppercase()
@@ -2242,30 +2238,80 @@ fn linux_provider_bootstrap_commands(spec: &PackageSpec) -> Result<Vec<Vec<Strin
     {
         return Ok(Vec::new());
     }
-    match spec.build_system {
-        BuildSystem::Cargo => Ok(shell_phase(linux_provider_cargo_bootstrap_script(spec))),
-        _ => Ok(Vec::new()),
+    let mut commands = Vec::new();
+    if spec.build_arch != spec.target_arch {
+        commands.extend(shell_phase(
+            linux_provider_cross_toolchain_bootstrap_script(spec),
+        ));
     }
+    match spec.build_system {
+        BuildSystem::Cmake => {
+            commands.extend(shell_phase(linux_provider_cmake_bootstrap_script(spec)));
+        }
+        BuildSystem::Cargo => {
+            commands.extend(shell_phase(linux_provider_cargo_bootstrap_script(spec)));
+        }
+        _ => {}
+    }
+    Ok(commands)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_provider_cross_toolchain_bootstrap_script(spec: &PackageSpec) -> String {
+    let cross_package = debian_crossbuild_package(&spec.target_arch);
+    let target_prefix = linux_gnu_toolchain_prefix(&spec.target_arch);
+    format!(
+        r#"
+export DEBIAN_FRONTEND=noninteractive
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y {cross_package}
+elif ! command -v {target_prefix}-gcc >/dev/null 2>&1; then
+  echo "cross-target Linux provider builds currently require a Debian or Ubuntu OCI base image, or a base image that already has {target_prefix}-gcc installed" >&2
+  exit 1
+fi
+"#,
+        cross_package = cross_package,
+        target_prefix = target_prefix,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_provider_cmake_bootstrap_script(spec: &PackageSpec) -> String {
+    format!(
+        r#"
+export DEBIAN_FRONTEND=noninteractive
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y build-essential cmake ninja-build pkg-config ca-certificates
+else
+  if ! command -v cmake >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
+    echo "BUILD_SYSTEM CMAKE via the Linux provider currently requires a Debian or Ubuntu OCI base image, or a base image that already has cmake and ninja installed" >&2
+    exit 1
+  fi
+  if [ "{build_arch}" = "{target_arch}" ]; then
+    if ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
+      echo "native BUILD_SYSTEM CMAKE via the Linux provider currently requires a Debian or Ubuntu OCI base image, or a base image that already has a native C/C++ toolchain installed" >&2
+      exit 1
+    fi
+  fi
+fi
+"#,
+        build_arch = spec.build_arch,
+        target_arch = spec.target_arch,
+    )
 }
 
 #[cfg(target_os = "linux")]
 fn linux_provider_cargo_bootstrap_script(spec: &PackageSpec) -> String {
     let build_triple = linux_gnu_target_triple(&spec.build_arch);
     let target_triple = linux_gnu_target_triple(&spec.target_arch);
-    let cross_package_install = if spec.build_arch == spec.target_arch {
-        String::new()
-    } else {
-        format!(
-            "\napt-get install -y {}",
-            debian_crossbuild_package(&spec.target_arch)
-        )
-    };
     format!(
         r#"
 export DEBIAN_FRONTEND=noninteractive
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
-  apt-get install -y build-essential clang cmake curl file git pkg-config ca-certificates{cross_package_install}
+  apt-get install -y build-essential clang cmake curl file git pkg-config ca-certificates
 elif ! command -v cargo >/dev/null 2>&1; then
   echo "BUILD_SYSTEM CARGO via the Linux provider currently requires a Debian or Ubuntu OCI base image, or a base image that already has cargo installed" >&2
   exit 1
@@ -2283,7 +2329,6 @@ fi
 rustup target add {build_triple}
 rustup target add {target_triple}
 "#,
-        cross_package_install = cross_package_install,
         cargo_home = PROVIDER_CARGO_HOME_DIR,
         rustup_home = PROVIDER_RUSTUP_HOME_DIR,
         build_triple = build_triple,
@@ -2362,6 +2407,23 @@ fn build_command_environment(
             ("CXXFLAGS".to_string(), String::new()),
             ("LDFLAGS".to_string(), String::new()),
         ]);
+    } else if matches!(
+        (&spec.build_root, &spec.toolchain),
+        (BuildRoot::Oci(_), ToolchainSource::Rootfs)
+    ) && spec.build_arch != spec.target_arch
+    {
+        let target_prefix = linux_gnu_toolchain_prefix(&spec.target_arch);
+        env.extend([
+            ("CC".to_string(), format!("{target_prefix}-gcc")),
+            ("CXX".to_string(), format!("{target_prefix}-g++")),
+            ("AR".to_string(), format!("{target_prefix}-ar")),
+            ("RANLIB".to_string(), format!("{target_prefix}-ranlib")),
+            ("STRIP".to_string(), format!("{target_prefix}-strip")),
+            ("CFLAGS".to_string(), String::new()),
+            ("CXXFLAGS".to_string(), String::new()),
+            ("LDFLAGS".to_string(), String::new()),
+        ]);
+        env.push(("PKG_CONFIG_ALLOW_CROSS".to_string(), "1".to_string()));
     }
     if matches!(
         (&spec.build_root, &spec.toolchain),
@@ -2430,7 +2492,6 @@ fn build_command_environment(
             format!("AR_{target_underscored_upper}"),
             format!("{target_prefix}-ar"),
         ));
-        env.push(("PKG_CONFIG_ALLOW_CROSS".to_string(), "1".to_string()));
     }
     if !dependency_roots.is_empty() {
         env.push(("CMAKE_PREFIX_PATH".to_string(), dependency_roots.join(";")));
@@ -5576,6 +5637,9 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
                 install_args = Vec::new();
             }
         }
+        let use_default_cmake_configure = selected_build_system == BuildSystem::Cmake
+            && cmake_configure.is_none()
+            && configure_override.is_none();
         let commands = synthesize_build_system_commands(
             selected_build_system,
             BuildSystemCommandInputs {
@@ -5609,6 +5673,17 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
             },
         );
         configure = commands.configure;
+        if use_default_cmake_configure
+            && matches!(
+                (&build_root, &toolchain),
+                (BuildRoot::Oci(_), ToolchainSource::Rootfs)
+            )
+            && build_arch != target_arch
+        {
+            if let Some(configure_command) = configure.first_mut() {
+                configure_command.extend(default_cmake_cross_configure_args(&target_arch));
+            }
+        }
         build = commands.build;
         install = commands.install;
     }
@@ -7798,6 +7873,19 @@ fn synthesize_build_system_commands(
         build,
         install,
     }
+}
+
+fn default_cmake_cross_configure_args(target_arch: &str) -> Vec<String> {
+    let target_prefix = linux_gnu_toolchain_prefix(target_arch);
+    vec![
+        "-DCMAKE_SYSTEM_NAME=Linux".to_string(),
+        format!("-DCMAKE_SYSTEM_PROCESSOR={target_arch}"),
+        format!("-DCMAKE_C_COMPILER={target_prefix}-gcc"),
+        format!("-DCMAKE_CXX_COMPILER={target_prefix}-g++"),
+        format!("-DCMAKE_AR={target_prefix}-ar"),
+        format!("-DCMAKE_RANLIB={target_prefix}-ranlib"),
+        format!("-DCMAKE_STRIP={target_prefix}-strip"),
+    ]
 }
 
 fn ensure_package_name(name: &str) -> Result<()> {
