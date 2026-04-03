@@ -1126,7 +1126,7 @@ impl Sandbox {
     fn new() -> Self {
         let guard = portable_test_lock()
             .lock()
-            .expect("portable integration test lock");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = tempfile::tempdir().expect("temporary directory");
         fs::create_dir_all(root.path().join("depofiles")).expect("create depofiles root");
         fs::create_dir_all(root.path().join(".run")).expect("create runtime root");
