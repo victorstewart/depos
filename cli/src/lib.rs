@@ -752,6 +752,8 @@ pub fn internal_materialize_prepared(options: &InternalMaterializePreparedOption
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    fs::create_dir_all(&store_root)
+        .with_context(|| format!("failed to create {}", store_root.display()))?;
     let mut log = String::new();
     log.push_str(&format!(
         "provider materializing {} from prepared source {}\n",
@@ -2251,8 +2253,8 @@ elif ! command -v cargo >/dev/null 2>&1; then
   echo "BUILD_SYSTEM CARGO via the Linux provider currently requires a Debian or Ubuntu OCI base image, or a base image that already has cargo installed" >&2
   exit 1
 fi
-export CARGO_HOME="${{CARGO_HOME:-{cargo_home}}}"
-export RUSTUP_HOME="${{RUSTUP_HOME:-{rustup_home}}}"
+export CARGO_HOME="{cargo_home}"
+export RUSTUP_HOME="{rustup_home}"
 export PATH="$CARGO_HOME/bin:$PATH"
 if ! command -v rustup >/dev/null 2>&1; then
   curl --fail --location --silent --show-error https://sh.rustup.rs | sh -s -- -y --profile minimal
