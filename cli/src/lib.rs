@@ -2413,6 +2413,12 @@ fn build_command_environment(
     ) && spec.build_arch != spec.target_arch
     {
         let target_prefix = linux_gnu_toolchain_prefix(&spec.target_arch);
+        let host = host_arch();
+        let qemu_guest_arch = if spec.build_arch != host {
+            spec.build_arch.as_str()
+        } else {
+            spec.target_arch.as_str()
+        };
         env.extend([
             ("CC".to_string(), format!("{target_prefix}-gcc")),
             ("CXX".to_string(), format!("{target_prefix}-g++")),
@@ -2424,7 +2430,7 @@ fn build_command_environment(
             ("LDFLAGS".to_string(), String::new()),
             (
                 "QEMU_LD_PREFIX".to_string(),
-                format!("/usr/{target_prefix}"),
+                format!("/usr/{}", linux_gnu_toolchain_prefix(qemu_guest_arch)),
             ),
         ]);
         env.push(("PKG_CONFIG_ALLOW_CROSS".to_string(), "1".to_string()));
