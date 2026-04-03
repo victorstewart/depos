@@ -56,28 +56,12 @@ jobs:
           set -euo pipefail
           log="$(mktemp)"
           if ! sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" test --locked --manifest-path cli/Cargo.toml -j"$(nproc)" 2>&1 | tee "$log"; then
-          echo "::error::Linux cargo test failed; recent output follows"
-          tail -n 200 "$log"
-          python - "$log" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-log_path = Path(sys.argv[1])
-lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-pattern = re.compile(r"test .*FAILED|failures:|panicked at|error:")
-seen = set()
-for index, line in enumerate(lines):
-    if not pattern.search(line):
-        continue
-    window = tuple(lines[index : index + 5])
-    if window in seen:
-        continue
-    seen.add(window)
-    block = " \\n ".join(window).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    print(f"::error::{block}")
-PY
-          exit 1
+            echo "::error::Linux cargo test failed; recent output follows"
+            tail -n 200 "$log"
+            grep -E 'test .*FAILED|failures:|panicked at|error:' "$log" | tail -n 20 | while IFS= read -r line; do
+              printf '::error::%s\n' "$line"
+            done
+            exit 1
           fi
 
       - name: Rust tests (macOS)
