@@ -14,6 +14,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
@@ -50,6 +51,9 @@ pub(crate) fn execute_linux_provider_command_pipeline(
     source_root: &Path,
     log: &mut String,
 ) -> Result<Vec<PathBuf>> {
+    let _provider_guard = provider_process_lock()
+        .lock()
+        .map_err(|_| anyhow!("linux provider process lock was poisoned"))?;
     let provider = LinuxProvider::detect()?;
     let repo_root = provider_source_repo()?;
     provider.ensure_bootstrap(&repo_root, log)?;
@@ -87,6 +91,11 @@ pub(crate) fn execute_linux_provider_command_pipeline(
 
     provider.run_shell(&format!("rm -rf {}", shell_quote(&job.root)), log)?;
     Ok(spec.required_paths())
+}
+
+fn provider_process_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn stage_registered_depofile(
