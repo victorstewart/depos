@@ -2,22 +2,12 @@ name: provider-ci
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - .github/workflows/provider-ci.yml
-      - cli/Cargo.toml
-      - Cargo.lock
-      - cli/src/lib.rs
-      - cli/src/linux_provider.rs
-      - cli/tests/portable_integration.rs
-  pull_request:
-    paths:
-      - .github/workflows/provider-ci.yml
-      - cli/Cargo.toml
-      - Cargo.lock
-      - cli/src/lib.rs
-      - cli/src/linux_provider.rs
-      - cli/tests/portable_integration.rs
+    inputs:
+      run_provider_ci:
+        description: "Run the heavy Windows WSL/provider CI lane"
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: provider-ci-${{ github.workflow }}-${{ github.ref }}
@@ -25,6 +15,8 @@ concurrency:
 
 jobs:
   windows-provider:
+    # This lane is manual-only by design. Hosted Windows always pays a cold WSL/provider cost.
+    if: ${{ inputs.run_provider_ci == true }}
     runs-on: windows-latest
 
     steps:
