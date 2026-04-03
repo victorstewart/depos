@@ -593,9 +593,12 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 $SUDO mkdir -p {runtime_root}
 if [ ! -f {bootstrap_stamp} ]; then
+  echo "provider bootstrap: cold"
   $SUDO apt-get update
   $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential clang cmake curl git pkg-config tar umoci skopeo qemu-user-static ca-certificates
   $SUDO touch {bootstrap_stamp}
+else
+  echo "provider bootstrap: warm"
 fi
 if ! command -v cargo >/dev/null 2>&1; then
   curl --fail --location --silent --show-error https://sh.rustup.rs | sh -s -- -y --profile minimal

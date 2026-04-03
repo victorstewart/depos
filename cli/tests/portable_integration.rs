@@ -343,6 +343,67 @@ fn sync_builds_linux_oci_cargo_binary_with_provider_when_enabled() {
         .is_file());
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn sync_reuses_wsl_provider_bootstrap_state_across_oci_builds() {
+    if !linux_provider_tests_enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let provider_root = unique_provider_root("reuse");
+
+    let first_archive = sandbox.create_source_archive(
+        "upstreams/provider_reuse_first",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+    with_env_vars(
+        &[
+            ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
+            ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
+        ],
+        || {
+            sync_with_depofile(
+                &sandbox,
+                "provider_reuse_first",
+                &provider_header_depofile(
+                    "provider_reuse_first",
+                    &portable_file_url(&first_archive),
+                ),
+            )
+        },
+    )
+    .expect("first OCI build should cold-bootstrap the provider");
+
+    let second_archive = sandbox.create_source_archive(
+        "upstreams/provider_reuse_second",
+        &[("payload/demo.h", "#pragma once\n")],
+    );
+    with_env_vars(
+        &[
+            ("DEPOS_LINUX_PROVIDER", Some("wsl2")),
+            ("DEPOS_LINUX_PROVIDER_ROOT", Some(&provider_root)),
+        ],
+        || {
+            sync_with_depofile(
+                &sandbox,
+                "provider_reuse_second",
+                &provider_header_depofile(
+                    "provider_reuse_second",
+                    &portable_file_url(&second_archive),
+                ),
+            )
+        },
+    )
+    .expect("second OCI build should reuse the provider bootstrap");
+
+    let second_log =
+        sandbox.read_materialization_log("provider_reuse_second", RELEASE_NAMESPACE, "1.0.0");
+    assert!(
+        second_log.contains("provider bootstrap: warm"),
+        "expected second build log to show warm provider bootstrap, got:\n{second_log}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn sync_reports_missing_direct_apple_virtualization_helper_for_oci_requests() {
@@ -619,6 +680,18 @@ fn linux_provider_tests_enabled() -> bool {
     )
 }
 
+#[cfg(target_os = "windows")]
+fn unique_provider_root(label: &str) -> String {
+    format!(
+        "/tmp/depos-provider-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    )
+}
+
 fn provider_header_depofile(package_name: &str, source_url: &str) -> String {
     format!(
         "NAME {package_name}\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL {source_url}\nBUILD_ROOT OCI docker://docker.io/library/alpine:3.20\nTOOLCHAIN ROOTFS\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/demo.h\" \"${{DEPO_PREFIX}}/include/{package_name}/demo.h\"\nEOF\nTARGET {package_name}::{package_name} INTERFACE include\n"
@@ -679,6 +752,19 @@ impl Sandbox {
             .join(namespace)
             .join(version)
             .join(relative)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn read_materialization_log(&self, name: &str, namespace: &str, version: &str) -> String {
+        fs::read_to_string(
+            self.depos_root()
+                .join(".run")
+                .join("logs")
+                .join(name)
+                .join(namespace)
+                .join(format!("{version}.log")),
+        )
+        .expect("read materialization log")
     }
 
     fn write(&self, relative: &str, contents: &str) {
