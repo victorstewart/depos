@@ -22,6 +22,29 @@ That is enough for a header-only dependency: name, version, source, and exported
 - `SOURCE_SUBDIR <path>`: build from a subdirectory inside the fetched source tree
 - `DEPENDS <name> VERSION <version>`: consume another package
 
+## Publishing A Library
+
+The recommended library-export shape is one detached top-level published `DepoFile` that
+consumers download directly:
+
+```text
+NAME cascade_lib
+VERSION 1.0.0
+SOURCE URL https://example.com/cascade_lib-1.0.0.tar.gz
+SHA256 <archive-digest>
+BUILD_SYSTEM CMAKE
+DEPENDS base_math VERSION 1.0.0
+DEPENDS adder VERSION 1.0.0
+TARGET cascade_lib::cascade_lib STATIC lib/libcascade_lib.a INTERFACE include
+```
+
+Keep that published `DepoFile` outside `depofiles/` and outside the source archive itself.
+Inside the source archive, keep only the library's dependency recipes under `depofiles/`.
+
+When a consumer requests the published `DepoFile`, `depos` fetches the source, discovers the
+embedded dependency `DepoFile`s from that fetched source tree, and resolves the transparent
+`DEPENDS` entries in the same flow.
+
 ## Build Systems
 
 `depos` supports these recipe families today:

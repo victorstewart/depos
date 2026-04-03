@@ -646,8 +646,9 @@ fn cargo_target_env_fragment(triple: &str) -> String {
 
 pub fn registry_dir_from_manifest(depos_root: &Path, manifest: &Path) -> Result<PathBuf> {
     let depos_root = resolve_depos_root(depos_root)?;
-    let catalog = load_catalog(&depos_root)?;
     let requests = parse_manifest(manifest)?;
+    rebuild_embedded_depofile_catalog(&depos_root, &requests)?;
+    let catalog = load_catalog(&depos_root)?;
     let selected = resolve_requests(&catalog, &requests)?;
     let variant = variant_for_selected_packages(&selected)?;
     let profile = manifest_profile(manifest)?;
@@ -665,8 +666,9 @@ pub fn sync_registry(options: &SyncOptions) -> Result<RegistryOutput> {
         .with_context(|| format!("failed to access manifest {}", options.manifest.display()))?;
     let executable = resolve_depos_executable(options.executable.as_deref())?;
 
-    let catalog = load_catalog(&depos_root)?;
     let requests = parse_manifest(&manifest)?;
+    rebuild_embedded_depofile_catalog(&depos_root, &requests)?;
+    let catalog = load_catalog(&depos_root)?;
     let selected = resolve_requests(&catalog, &requests)?;
     let variant = variant_for_selected_packages(&selected)?;
     let variant_root = depos_root.join("store").join(&variant);
@@ -725,12 +727,12 @@ pub fn internal_materialize_prepared(options: &InternalMaterializePreparedOption
     })?;
     ensure_package_name(&options.name)?;
     ensure_namespace_name(&options.namespace)?;
-    let depofile = registered_depofile_path(
+    let depofile = resolve_registered_depofile_path(
         &depos_root,
         &options.name,
         &options.namespace,
         &options.version,
-    );
+    )?;
     let spec = parse_registered_depofile(
         &depofile,
         &options.name,
@@ -4116,7 +4118,12 @@ fn package_exports_present(spec: &PackageSpec, store_root: &Path) -> Result<bool
 }
 
 fn registered_depofile_hash(depos_root: &Path, spec: &PackageSpec) -> Result<String> {
-    let path = registered_depofile_path(depos_root, &spec.name, &spec.namespace, &spec.version);
+    let path = resolve_registered_depofile_path(
+        depos_root,
+        &spec.name,
+        &spec.namespace,
+        &spec.version,
+    )?;
     hash_file_sha256(&path)
 }
 
@@ -4213,7 +4220,12 @@ fn write_materialization_status(
         lazy: spec.lazy,
         system_libs: spec.system_libs.clone(),
         state,
-        depofile: registered_depofile_path(depos_root, &spec.name, &spec.namespace, &spec.version),
+        depofile: resolve_registered_depofile_path(
+            depos_root,
+            &spec.name,
+            &spec.namespace,
+            &spec.version,
+        )?,
         message,
         source_ref: provenance.source_ref,
         source_commit: provenance.source_commit,
@@ -5803,7 +5815,106 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
 fn load_catalog(depos_root: &Path) -> Result<Vec<PackageSpec>> {
     let mut catalog = builtin_catalog();
     catalog.extend(load_local_depofiles(depos_root)?);
+    catalog.extend(load_embedded_depofiles(depos_root)?);
     Ok(catalog)
+}
+
+fn rebuild_embedded_depofile_catalog(depos_root: &Path, requests: &[PackageRequest]) -> Result<()> {
+    let embedded_root = embedded_depofiles_root(depos_root);
+    remove_existing_path(&embedded_root)?;
+    if requests.is_empty() {
+        return Ok(());
+    }
+
+    let mut catalog = builtin_catalog();
+    catalog.extend(load_local_depofiles(depos_root)?);
+    let mut hydrated = BTreeSet::new();
+    for request in requests {
+        hydrate_embedded_depofiles_for_request(
+            depos_root,
+            request,
+            &mut catalog,
+            &mut hydrated,
+            &embedded_root,
+        )?;
+    }
+    Ok(())
+}
+
+fn hydrate_embedded_depofiles_for_request(
+    depos_root: &Path,
+    request: &PackageRequest,
+    catalog: &mut Vec<PackageSpec>,
+    hydrated: &mut BTreeSet<String>,
+    embedded_root: &Path,
+) -> Result<()> {
+    let by_key = group_catalog_by_key(catalog);
+    let candidates = by_key.get(&request.identity_key()).with_context(|| {
+        format!(
+            "no registered package named '{}[{}]' while preparing embedded source DepoFiles",
+            request.name, request.namespace
+        )
+    })?;
+    let spec = select_package(candidates, &request.mode).with_context(|| {
+        format!(
+            "failed to resolve package '{}[{}]' while preparing embedded source DepoFiles",
+            request.name, request.namespace
+        )
+    })?;
+    hydrate_embedded_depofiles_for_spec(depos_root, &spec, catalog, hydrated, embedded_root)
+}
+
+fn hydrate_embedded_depofiles_for_spec(
+    depos_root: &Path,
+    spec: &PackageSpec,
+    catalog: &mut Vec<PackageSpec>,
+    hydrated: &mut BTreeSet<String>,
+    embedded_root: &Path,
+) -> Result<()> {
+    if !hydrated.insert(spec.package_id()) {
+        return Ok(());
+    }
+
+    if spec.fetch.is_some() {
+        let mut log = String::new();
+        let resolved_source = resolve_package_source(depos_root, spec, &mut log)?;
+        prepare_package_source(&resolved_source.preparation, &mut log)?;
+        copy_embedded_depofiles_into_catalog(
+            depos_root,
+            spec,
+            &resolved_source.source_root,
+            embedded_root,
+        )?;
+        *catalog = load_catalog(depos_root)?;
+    }
+
+    let by_key = group_catalog_by_key(catalog);
+    for dependency in &spec.depends {
+        let candidates = by_key.get(&dependency.identity_key()).with_context(|| {
+            format!(
+                "package '{}' depends on missing package '{}[{}]'",
+                spec.package_id(),
+                dependency.name,
+                dependency.namespace
+            )
+        })?;
+        let dependency_spec = select_package(candidates, &dependency.mode).with_context(|| {
+            format!(
+                "package '{}' could not resolve dependency '{}[{}]' while preparing embedded source DepoFiles",
+                spec.package_id(),
+                dependency.name,
+                dependency.namespace
+            )
+        })?;
+        hydrate_embedded_depofiles_for_spec(
+            depos_root,
+            &dependency_spec,
+            catalog,
+            hydrated,
+            embedded_root,
+        )?;
+    }
+    Ok(())
 }
 
 fn parse_registered_depofile(
@@ -5961,9 +6072,20 @@ fn builtin_zlib_static_library_path() -> &'static str {
     }
 }
 
+fn embedded_depofiles_root(depos_root: &Path) -> PathBuf {
+    depos_root.join("depofiles").join(".embedded")
+}
+
+fn load_embedded_depofiles(depos_root: &Path) -> Result<Vec<PackageSpec>> {
+    load_registered_depofiles_from_root(&embedded_depofiles_root(depos_root))
+}
+
 fn load_local_depofiles(depos_root: &Path) -> Result<Vec<PackageSpec>> {
+    load_registered_depofiles_from_root(&depos_root.join("depofiles").join("local"))
+}
+
+fn load_registered_depofiles_from_root(root: &Path) -> Result<Vec<PackageSpec>> {
     let mut packages = Vec::new();
-    let root = depos_root.join("depofiles").join("local");
     if !root.exists() {
         return Ok(packages);
     }
@@ -5997,6 +6119,113 @@ fn load_local_depofiles(depos_root: &Path) -> Result<Vec<PackageSpec>> {
     }
 
     Ok(packages)
+}
+
+fn copy_embedded_depofiles_into_catalog(
+    depos_root: &Path,
+    owner: &PackageSpec,
+    fetched_source_root: &Path,
+    embedded_root: &Path,
+) -> Result<()> {
+    for depofiles_root in embedded_depofile_roots(owner, fetched_source_root)? {
+        for depofile_path in discover_depofiles_under(&depofiles_root)? {
+            let depofile_spec = parse_depofile(&depofile_path).with_context(|| {
+                format!(
+                    "failed to parse embedded DepoFile {} from package '{}'",
+                    depofile_path.display(),
+                    owner.package_id()
+                )
+            })?;
+            if depofile_spec.name == owner.name && depofile_spec.version == owner.version {
+                continue;
+            }
+            let local_override = registered_depofile_path(
+                depos_root,
+                &depofile_spec.name,
+                &owner.namespace,
+                &depofile_spec.version,
+            );
+            if local_override.exists() {
+                continue;
+            }
+            let destination = embedded_root
+                .join(&depofile_spec.name)
+                .join(&owner.namespace)
+                .join(&depofile_spec.version)
+                .join("main.DepoFile");
+            if destination.exists() {
+                let existing = fs::read(&destination)
+                    .with_context(|| format!("failed to read {}", destination.display()))?;
+                let current = fs::read(&depofile_path)
+                    .with_context(|| format!("failed to read {}", depofile_path.display()))?;
+                if existing != current {
+                    bail!(
+                        "embedded DepoFile conflict for '{}[{}]@{}' while preparing package '{}': {} and {} differ",
+                        depofile_spec.name,
+                        owner.namespace,
+                        depofile_spec.version,
+                        owner.package_id(),
+                        destination.display(),
+                        depofile_path.display()
+                    );
+                }
+                continue;
+            }
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::copy(&depofile_path, &destination).with_context(|| {
+                format!(
+                    "failed to copy embedded DepoFile {} to {}",
+                    depofile_path.display(),
+                    destination.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn embedded_depofile_roots(owner: &PackageSpec, fetched_source_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    let source_root = resolve_source_root(fetched_source_root, owner)?;
+    for candidate in [
+        fetched_source_root.join("depofiles"),
+        source_root.join("depofiles"),
+    ] {
+        if candidate.is_dir() && !roots.iter().any(|existing| existing == &candidate) {
+            roots.push(candidate);
+        }
+    }
+    Ok(roots)
+}
+
+fn discover_depofiles_under(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut depofiles = Vec::new();
+    if !root.exists() {
+        return Ok(depofiles);
+    }
+    discover_depofiles_under_recursive(root, &mut depofiles)?;
+    depofiles.sort();
+    Ok(depofiles)
+}
+
+fn discover_depofiles_under_recursive(root: &Path, depofiles: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in read_dir_sorted(root)? {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if file_type.is_dir() {
+            discover_depofiles_under_recursive(&path, depofiles)?;
+            continue;
+        }
+        if file_type.is_file() && path.extension() == Some(OsStr::new("DepoFile")) {
+            depofiles.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn resolve_requests(
@@ -6728,13 +6957,7 @@ fn refresh_status(
     namespace: &str,
     version: &str,
 ) -> Result<PackageStatus> {
-    let depofile_path = registered_depofile_path(depos_root, name, namespace, version);
-    if !depofile_path.exists() {
-        bail!(
-            "registered DepoFile is missing: {}",
-            depofile_path.display()
-        );
-    }
+    let depofile_path = resolve_registered_depofile_path(depos_root, name, namespace, version)?;
     let spec = parse_registered_depofile(&depofile_path, name, namespace, version)?;
     let catalog = load_catalog(depos_root)?;
     let missing_dependencies = spec
@@ -8124,6 +8347,43 @@ fn registered_depofile_path(
         .join(namespace)
         .join(version)
         .join("main.DepoFile")
+}
+
+fn embedded_registered_depofile_path(
+    depos_root: &Path,
+    name: &str,
+    namespace: &str,
+    version: &str,
+) -> PathBuf {
+    embedded_depofiles_root(depos_root)
+        .join(name)
+        .join(namespace)
+        .join(version)
+        .join("main.DepoFile")
+}
+
+fn resolve_registered_depofile_path(
+    depos_root: &Path,
+    name: &str,
+    namespace: &str,
+    version: &str,
+) -> Result<PathBuf> {
+    let local = registered_depofile_path(depos_root, name, namespace, version);
+    if local.exists() {
+        return Ok(local);
+    }
+    let embedded = embedded_registered_depofile_path(depos_root, name, namespace, version);
+    if embedded.exists() {
+        return Ok(embedded);
+    }
+    bail!(
+        "registered DepoFile is missing for '{}[{}]@{}': checked {} and {}",
+        name,
+        namespace,
+        version,
+        local.display(),
+        embedded.display()
+    );
 }
 
 fn status_file_path(depos_root: &Path, name: &str, namespace: &str, version: &str) -> PathBuf {

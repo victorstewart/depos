@@ -92,6 +92,11 @@ depos_depend("${CMAKE_CURRENT_SOURCE_DIR}/third_party/cascade_lib.DepoFile")
 depos_link(app cascade_lib)
 ```
 
+The intended published shape is one detached top-level `cascade_lib.DepoFile` outside the
+source archive. That published `DepoFile` points at the release tarball and lists transparent
+`DEPENDS`. The fetched source archive can then carry `depofiles/` for the library's own
+dependencies, which `depos` now discovers during the same resolution flow.
+
 ## Project Defaults
 
 If you want repo-local defaults without hardcoding them in `CMakeLists.txt`, add `depos.project.cmake` next to `.depos.cmake`:

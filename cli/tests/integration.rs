@@ -3529,18 +3529,14 @@ fn cmake_depofile_consumer_matrix_cascades_transitive_dependencies() {
         2,
     );
 
-    for consumer_mode in ["package", "path"] {
+        for consumer_mode in ["package", "path"] {
         for resolution_mode in ["explicit", "bootstrap"] {
             let scenario = format!("consumer-{consumer_mode}-{resolution_mode}");
-            let (library_repo, published_depofile) =
+            let (_library_repo, published_depofile) =
                 create_cascade_library_repo(&sandbox, &scenario, &base_repo, &adder_repo);
             let consumer_root = sandbox.depos_root().join("consumers").join(&scenario);
-            create_cascade_consumer_project(
-                &consumer_root,
-                &library_repo,
-                &published_depofile,
-                consumer_mode,
-            );
+            let consumer_depofile =
+                create_cascade_consumer_project(&consumer_root, &published_depofile, consumer_mode);
 
             let build_dir = consumer_root.join("build");
             let mut definitions = vec![
@@ -3550,7 +3546,7 @@ fn cmake_depofile_consumer_matrix_cascades_transitive_dependencies() {
                 ),
                 (
                     "CASCADE_LIBRARY_DEPOFILE".to_string(),
-                    published_depofile.display().to_string(),
+                    consumer_depofile.display().to_string(),
                 ),
             ];
             let envs = cmake_resolution_env(
@@ -3626,7 +3622,6 @@ fn create_cascade_library_repo(
     base_repo: &Path,
     adder_repo: &Path,
 ) -> (PathBuf, PathBuf) {
-    let library_repo = sandbox.depos_root().join("libraries").join(relative);
     let repo = sandbox.create_git_repo_owned(
         &format!("libraries/{relative}"),
         &[
@@ -3667,25 +3662,38 @@ fn create_cascade_library_repo(
                     adder_repo.display()
                 ),
             ),
-            (
-                "published/cascade_lib.DepoFile".to_string(),
-                format!(
-                    "NAME cascade_lib\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE GIT {} HEAD\nBUILD_SYSTEM CMAKE\nDEPENDS base_math VERSION 1.0.0\nDEPENDS adder VERSION 1.0.0\nTARGET cascade_lib::cascade_lib STATIC lib/libcascade_lib.a INTERFACE include\n",
-                    library_repo.display()
-                ),
-            ),
         ],
     );
-    let published_depofile = repo.join("published/cascade_lib.DepoFile");
+    let archive = sandbox.create_tar_archive_from_directory(&format!("archives/{relative}"), &repo);
+    let archive_sha256 = format!(
+        "{:x}",
+        Sha256::digest(fs::read(&archive).expect("read cascade library archive"))
+    );
+    let published_depofile = sandbox
+        .depos_root()
+        .join("published")
+        .join(relative)
+        .join("cascade_lib.DepoFile");
+    if let Some(parent) = published_depofile.parent() {
+        fs::create_dir_all(parent).expect("create published depofile parent");
+    }
+    fs::write(
+        &published_depofile,
+        format!(
+            "NAME cascade_lib\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nSOURCE URL file://{}\nSHA256 {}\nBUILD_SYSTEM CMAKE\nDEPENDS base_math VERSION 1.0.0\nDEPENDS adder VERSION 1.0.0\nTARGET cascade_lib::cascade_lib STATIC lib/libcascade_lib.a INTERFACE include\n",
+            archive.display(),
+            archive_sha256,
+        ),
+    )
+    .expect("write detached published depofile");
     (repo, published_depofile)
 }
 
 fn create_cascade_consumer_project(
     consumer_root: &Path,
-    library_repo: &Path,
     published_depofile: &Path,
     consumer_mode: &str,
-) {
+) -> PathBuf {
     fs::create_dir_all(consumer_root).expect("create consumer root");
     fs::copy(
         repo_root().join(".depos.cmake"),
@@ -3704,17 +3712,24 @@ fn create_cascade_consumer_project(
     .expect("write consumer main");
 
     if consumer_mode == "package" {
-        copy_tree(
-            &library_repo.join("depofiles"),
-            &consumer_root.join("depofiles"),
-        );
         let consumer_library_depofile =
             consumer_root.join("depofiles/cascade_lib/release/1.0.0/main.DepoFile");
         if let Some(parent) = consumer_library_depofile.parent() {
             fs::create_dir_all(parent).expect("create consumer library depofile parent");
         }
-        fs::copy(published_depofile, consumer_library_depofile)
+        fs::copy(published_depofile, &consumer_library_depofile)
             .expect("copy published depofile into consumer depofiles");
+        consumer_library_depofile
+    } else if consumer_mode == "path" {
+        let detached_depofile = consumer_root.join("third_party/cascade_lib.DepoFile");
+        if let Some(parent) = detached_depofile.parent() {
+            fs::create_dir_all(parent).expect("create detached depofile parent");
+        }
+        fs::copy(published_depofile, &detached_depofile)
+            .expect("copy detached published depofile into consumer project");
+        detached_depofile
+    } else {
+        panic!("unsupported consumer mode {consumer_mode}");
     }
 }
 
@@ -4227,6 +4242,27 @@ impl Sandbox {
                 "-C",
                 root.to_str().expect("utf-8 root path"),
                 "payload",
+            ],
+        );
+        archive
+    }
+
+    fn create_tar_archive_from_directory(&self, relative: &str, source: &Path) -> PathBuf {
+        let root = self.root.path().join(relative);
+        let archive = root.join("payload.tar");
+        if let Some(parent) = archive.parent() {
+            fs::create_dir_all(parent).expect("create directory archive parent");
+        }
+        run_command_vec(
+            self.root.path(),
+            &[
+                "tar".to_string(),
+                "-cf".to_string(),
+                archive.display().to_string(),
+                "--exclude=.git".to_string(),
+                "-C".to_string(),
+                source.display().to_string(),
+                ".".to_string(),
             ],
         );
         archive

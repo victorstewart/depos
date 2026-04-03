@@ -10,6 +10,12 @@ cargo install depos --version 0.4.0
 
 Use the CLI when you want to register recipes, sync manifests, or inspect repository state outside of the CMake helper flow.
 
+For published-library consumption, the intended export shape is one detached top-level
+published `DepoFile` outside the source archive. That file points at the release source
+archive, lists transparent `DEPENDS`, and lets `depos` discover dependency `depofiles/`
+from inside the fetched source tree. The source archive's `depofiles/` directory is for the
+library's dependencies, not for the consumer-facing published `DepoFile`.
+
 ## Core Commands
 
 ```bash

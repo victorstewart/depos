@@ -46,6 +46,19 @@ depos_depend_all()
 depos_link_all(app)
 ```
 
+## Publishing Your Own Library
+
+The recommended export pattern is:
+
+- publish one detached top-level `your_lib.DepoFile`
+- keep that published `DepoFile` outside `depofiles/` and outside the source archive
+- have that published `DepoFile` point at the release source archive with `SOURCE URL ...`
+- keep the source archive's `depofiles/` tree for the library's dependency recipes only
+
+That lets consumers download only the published `DepoFile`. `depos` fetches the source
+archive, discovers embedded dependency `DepoFile`s from the fetched source tree, and resolves
+the full graph in one flow.
+
 ## Bootstrap Behavior
 
 By default `.depos.cmake` bootstraps `depos 0.4.0` into a hidden top-level `.depos/` directory next to the helper. It keeps the local registry and bootstrap state there too.

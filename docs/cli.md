@@ -46,6 +46,7 @@ depos registry-dir --manifest /path/to/deps.cmake
 ```text
 depos_root/
   depofiles/local/<name>/<namespace>/<version>/main.DepoFile
+  depofiles/.embedded/<name>/<namespace>/<version>/main.DepoFile
   store/<variant>/<name>/<namespace>/<version>/...
   registry/<variant>/<manifest-profile>/...
 ```
@@ -53,6 +54,7 @@ depos_root/
 That root holds:
 
 - registered `DepoFile`s
+- generated embedded dependency `DepoFile`s discovered from fetched source trees
 - materialized package outputs
 - generated CMake registries
 
