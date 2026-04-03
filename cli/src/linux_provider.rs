@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    append_process_failure_output, append_process_output, canonical_path,
-    package_relative_store_root, package_store_root, registered_depofile_path,
-    remove_existing_path, resolve_dependency_specs, variant_for_target_arch, PackageOrigin,
-    PackageSpec,
+    append_process_failure_output, append_process_output, canonical_path, package_store_root,
+    registered_depofile_path, remove_existing_path, resolve_dependency_specs,
+    variant_for_target_arch, PackageOrigin, PackageSpec,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -69,7 +68,7 @@ pub(crate) fn execute_linux_provider_command_pipeline(
         let dependency_store_root = package_store_root(depos_root, &job.variant, dependency);
         provider.push_path(
             &dependency_store_root,
-            &remote_store_parent(&job.variant_root, dependency)?,
+            &remote_store_parent(&job.variant_root, dependency),
             log,
         )?;
     }
@@ -120,12 +119,15 @@ fn remote_depofile_parent(provider_depos_root: &str, spec: &PackageSpec) -> Stri
     )
 }
 
-fn remote_store_parent(variant_root: &str, spec: &PackageSpec) -> Result<String> {
-    let relative = package_relative_store_root(spec);
-    let parent = relative
-        .parent()
-        .ok_or_else(|| anyhow!("package store path had no parent for {}", spec.package_id()))?;
-    Ok(format!("{}/{}", variant_root, parent.display()))
+fn remote_store_parent(variant_root: &str, spec: &PackageSpec) -> String {
+    format!("{}/{}/{}", variant_root, spec.name, spec.namespace)
+}
+
+fn remote_store_root(variant_root: &str, spec: &PackageSpec) -> String {
+    format!(
+        "{}/{}/{}/{}",
+        variant_root, spec.name, spec.namespace, spec.version
+    )
 }
 
 impl LinuxProvider {
@@ -194,11 +196,7 @@ impl LinuxProvider {
         let root = format!("{}/jobs/{job_suffix}", self.runtime_root);
         let depos_root = format!("{root}/depos-root");
         let variant_root = format!("{depos_root}/store/{variant}");
-        let store_root = format!(
-            "{}/{}",
-            variant_root,
-            package_relative_store_root(spec).display()
-        );
+        let store_root = remote_store_root(&variant_root, spec);
         self.run_shell(
             &format!(
                 "rm -rf {root} && mkdir -p {variant_root}",
