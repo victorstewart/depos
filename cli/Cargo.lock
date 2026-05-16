@@ -349,6 +349,8 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "metalor"
 version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beca7ad8ba12adbb44eff7c8621ed193a3a1d701ce31f84848b96c677497763d"
 dependencies = [
  "anyhow",
  "flate2",

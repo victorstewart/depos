@@ -83,7 +83,7 @@ exit /b 1
 
 :after
 if "%root%"=="" exit /b 1
-if not "%version%"=="0.4.0" exit /b 1
+if not "%version%"=="]=] "${DEPOS_BOOTSTRAP_VERSION}" [=[" exit /b 1
 if not "%crate%"=="depos" exit /b 1
 if not exist "%root%\\bin" mkdir "%root%\\bin"
 copy /Y "]=] "${DEPOS_TEST_FAKE_CARGO_SOURCE_BINARY}" [=[" "%root%\\bin\\depos.exe" >NUL
@@ -130,7 +130,7 @@ while (($#)); do
 done
 
 test -n "$root"
-test "$version" = "0.4.0"
+test "$version" = "]=] "${DEPOS_BOOTSTRAP_VERSION}" [=["
 test "$crate" = "depos"
 mkdir -p "$root/bin"
 cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"
