@@ -26,7 +26,7 @@ depos_depend(itoa)
 depos_link(app itoa)
 ```
 
-`.depos.cmake` is the low-friction path. By default it bootstraps `depos 0.5.0` locally on first use.
+`.depos.cmake` is the low-friction path. By default it bootstraps `depos 0.5.1` locally on first use.
 
 If you publish a library for others to consume through `depos`, ship one detached top-level
 published `DepoFile` outside your source archive. That published `DepoFile` should point at
@@ -52,6 +52,8 @@ Why this exists: stop letting `/usr`, `/lib`, `/usr/local`, or some random SDK d
 - `BUILD_ROOT SYSTEM` for convenience
 - `BUILD_ROOT SCRATCH` for minimal hermetic Linux builds
 - `BUILD_ROOT OCI <image>` for pinned Linux distro roots and cross-target packaging
+- On Linux, `DEPOS_LINUX_ISOLATION=auto` tries rootless user namespaces first; if unavailable, only `BUILD_ROOT SYSTEM` falls back to host-staged execution
+- `BUILD_ROOT SCRATCH` and `BUILD_ROOT OCI <image>` never silently degrade to host-staged execution; use `DEPOS_LINUX_ISOLATION=privileged` when rootless namespaces are unavailable and the process has `CAP_SYS_ADMIN`
 - On macOS and Windows, native `BUILD_ROOT SYSTEM` stays on the portable host backend
 - [EXPERIMENTAL] On macOS and Windows, selecting `BUILD_ROOT OCI <image>` routes through a local Linux provider instead of the host-native portable backend
 - [EXPERIMENTAL] On Windows, auto provider mode prefers a local `Ubuntu-24.04` WSL distro and installs it lazily if needed

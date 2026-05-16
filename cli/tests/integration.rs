@@ -2569,6 +2569,89 @@ fn sync_materializes_command_driven_package_into_fresh_root() {
 }
 
 #[test]
+fn cli_sync_materializes_system_package_with_host_isolation_override() {
+    let sandbox = Sandbox::new();
+    let upstream = sandbox.create_git_repo(
+        "upstreams/host_cmd_demo",
+        &[("payload/demo.h", "// built by host-staged backend\n")],
+    );
+    sandbox.write(
+        "depofiles/local/host_cmd_demo/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME host_cmd_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nTARGET host_cmd_demo::host_cmd_demo INTERFACE include\nSOURCE GIT {} HEAD\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\nmkdir -p \"${{DEPO_PREFIX}}/include/host_cmd_demo\" && cp \"${{DEPO_SOURCE_DIR}}/payload/demo.h\" \"${{DEPO_PREFIX}}/include/host_cmd_demo/demo.h\"\nEOF\n",
+            upstream.display()
+        ),
+    );
+    sandbox.write(
+        "manifests/host_cmd_demo.cmake",
+        "depos_require(host_cmd_demo VERSION 1.0.0)\n",
+    );
+
+    let manifest = sandbox.depos_root().join("manifests/host_cmd_demo.cmake");
+    let output = Command::new(env!("CARGO_BIN_EXE_depos"))
+        .env("DEPOS_LINUX_ISOLATION", "host")
+        .args(["sync", "--depos-root"])
+        .arg(sandbox.depos_root())
+        .arg("--manifest")
+        .arg(manifest)
+        .output()
+        .expect("spawn depos sync");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(sandbox
+        .package_store_path(
+            "host_cmd_demo",
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            "include/host_cmd_demo/demo.h"
+        )
+        .exists());
+}
+
+#[test]
+fn cli_sync_rejects_host_isolation_override_for_scratch_root() {
+    let sandbox = Sandbox::new();
+    let upstream = sandbox.create_git_repo(
+        "upstreams/host_rejected_scratch",
+        &[("payload/demo.h", "// scratch should not host fallback\n")],
+    );
+    sandbox.write(
+        "depofiles/local/host_rejected_scratch/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME host_rejected_scratch\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nBUILD_ROOT SCRATCH\nTARGET host_rejected_scratch::host_rejected_scratch INTERFACE include\nSOURCE GIT {} HEAD\n{}\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\ninstall -D \"${{DEPO_SOURCE_DIR}}/payload/demo.h\" \"${{DEPO_PREFIX}}/include/host_rejected_scratch/demo.h\"\nEOF\n",
+            upstream.display(),
+            scratch_toolchain_lines()
+        ),
+    );
+    sandbox.write(
+        "manifests/host_rejected_scratch.cmake",
+        "depos_require(host_rejected_scratch VERSION 1.0.0)\n",
+    );
+
+    let manifest = sandbox
+        .depos_root()
+        .join("manifests/host_rejected_scratch.cmake");
+    let output = Command::new(env!("CARGO_BIN_EXE_depos"))
+        .env("DEPOS_LINUX_ISOLATION", "host")
+        .args(["sync", "--depos-root"])
+        .arg(sandbox.depos_root())
+        .arg("--manifest")
+        .arg(manifest)
+        .output()
+        .expect("spawn depos sync");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("host-staged backend is only valid for BUILD_ROOT SYSTEM"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn sync_materializes_manual_install_tree_package_without_shell_install() {
     let sandbox = Sandbox::new();
     let upstream = sandbox.create_git_repo(

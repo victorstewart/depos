@@ -96,6 +96,8 @@ LINK openssl openssl::crypto openssl::ssl
 - `TOOLCHAIN ROOTFS`: Linux-only rootfs toolchain mode
 - `BUILD_ARCH` and `TARGET_ARCH`: build/target split for advanced Linux flows
 
+On Linux, `DEPOS_LINUX_ISOLATION=auto` tries rootless user namespaces first. If that is unavailable, `BUILD_ROOT SYSTEM` may fall back to host-staged execution, but `BUILD_ROOT SCRATCH` and `BUILD_ROOT OCI <image>` fail rather than weakening their root contract.
+
 On macOS and Windows, `depos` keeps native `BUILD_ROOT SYSTEM` on the portable host backend. [EXPERIMENTAL] `BUILD_ROOT OCI <image>` now routes through a local Linux provider instead of being rejected outright. `depos` still explicitly rejects:
 
 - `BUILD_ROOT SCRATCH`

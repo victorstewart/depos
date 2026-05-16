@@ -61,12 +61,12 @@ them automatically, and resolves the full graph in one flow.
 
 ## Bootstrap Behavior
 
-By default `.depos.cmake` bootstraps `depos 0.5.0` into a hidden top-level `.depos/` directory next to the helper. It keeps the local registry and bootstrap state there too.
+By default `.depos.cmake` bootstraps `depos 0.5.1` into a hidden top-level `.depos/` directory next to the helper. It keeps the local registry and bootstrap state there too.
 
 If you do not want local bootstrap, install `depos` yourself:
 
 ```bash
-cargo install depos --version 0.5.0
+cargo install depos --version 0.5.1
 ```
 
 Then point CMake at it with `DEPOS_EXECUTABLE`. If you want a shared root instead of the project-local `.depos/`, set `DEPOS_ROOT` too.

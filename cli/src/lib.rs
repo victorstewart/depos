@@ -12,11 +12,12 @@ use metalor::runtime::windows::{
 };
 #[cfg(target_os = "linux")]
 use metalor::{
-    build_unshare_reexec_command, prepare_oci_rootfs, prepare_runtime_emulator, BindMount,
-    ContainerRunCommand,
+    build_unshare_reexec_command_with_backend, prepare_oci_rootfs, prepare_runtime_emulator,
+    probe_rootless_userns, BindMount, ContainerRunCommand, LinuxNamespaceBackend,
+    LinuxNamespaceProbe,
 };
 use metalor::{interpolate_braced_variables, significant_lines, valid_identifier};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use metalor::{
     BuildCellSpec, CacheSpec, CellPath, CleanupPolicy, CommandSpec, HostPath, ImportSpec,
     NetworkPolicy, WorkspaceSeed,
@@ -39,6 +40,24 @@ const CELL_BUILD_DIR: &str = "/work/build";
 const CELL_PREFIX_DIR: &str = "/work/prefix";
 const CELL_DEPS_DIR: &str = "/depos";
 const CELL_TMP_DIR: &str = "/tmp";
+#[cfg(target_os = "linux")]
+const DEPOS_LINUX_ISOLATION_ENV: &str = "DEPOS_LINUX_ISOLATION";
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxExecutionBackend {
+    Namespaced(LinuxNamespaceBackend),
+    HostStaged,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxIsolationRequest {
+    Auto,
+    Rootless,
+    Host,
+    Privileged,
+}
 
 pub fn default_depos_root_path() -> PathBuf {
     host_home_dir()
@@ -1277,12 +1296,225 @@ fn prepare_package_source(preparation: &SourcePreparationPlan, log: &mut String)
 }
 
 #[cfg(target_os = "linux")]
+fn parse_linux_isolation_request() -> Result<LinuxIsolationRequest> {
+    match std::env::var(DEPOS_LINUX_ISOLATION_ENV) {
+        Ok(value) => match value.as_str() {
+            "" | "auto" => Ok(LinuxIsolationRequest::Auto),
+            "rootless" => Ok(LinuxIsolationRequest::Rootless),
+            "host" => Ok(LinuxIsolationRequest::Host),
+            "privileged" => Ok(LinuxIsolationRequest::Privileged),
+            other => bail!(
+                "unsupported {DEPOS_LINUX_ISOLATION_ENV}={other}; expected one of: auto, rootless, host, privileged"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(LinuxIsolationRequest::Auto),
+        Err(std::env::VarError::NotUnicode(value)) => bail!(
+            "{DEPOS_LINUX_ISOLATION_ENV} must be valid UTF-8, got {}",
+            value.to_string_lossy()
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn strict_root_required(spec: &PackageSpec) -> bool {
+    matches!(spec.build_root, BuildRoot::Scratch | BuildRoot::Oci(_))
+}
+
+#[cfg(target_os = "linux")]
+fn build_root_label(root: &BuildRoot) -> String {
+    match root {
+        BuildRoot::System => "BUILD_ROOT SYSTEM".to_string(),
+        BuildRoot::Scratch => "BUILD_ROOT SCRATCH".to_string(),
+        BuildRoot::Oci(reference) => format!("BUILD_ROOT OCI {reference}"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn select_linux_backend(
+    spec: &PackageSpec,
+    disable_network: bool,
+    mode: LinuxIsolationRequest,
+    log: &mut String,
+) -> Result<LinuxExecutionBackend> {
+    let strict = strict_root_required(spec);
+    match mode {
+        LinuxIsolationRequest::Rootless => {
+            let probe = probe_rootless_userns(disable_network);
+            if probe.ok {
+                log.push_str("using rootless Linux namespace backend\n");
+                return Ok(LinuxExecutionBackend::Namespaced(
+                    LinuxNamespaceBackend::RootlessUser,
+                ));
+            }
+            bail!(
+                "rootless Linux namespaces unavailable:\n{}",
+                render_linux_namespace_probe_failure(&probe)
+            );
+        }
+        LinuxIsolationRequest::Host => {
+            if strict {
+                bail!(
+                    "host-staged backend is only valid for BUILD_ROOT SYSTEM; {} requires Linux namespace isolation",
+                    build_root_label(&spec.build_root)
+                );
+            }
+            log.push_str("using host-staged BUILD_ROOT SYSTEM backend\n");
+            return Ok(LinuxExecutionBackend::HostStaged);
+        }
+        LinuxIsolationRequest::Privileged => {
+            log.push_str("using privileged Linux namespace backend\n");
+            return Ok(LinuxExecutionBackend::Namespaced(
+                LinuxNamespaceBackend::Privileged,
+            ));
+        }
+        LinuxIsolationRequest::Auto => {}
+    }
+
+    let rootless = probe_rootless_userns(disable_network);
+    if rootless.ok {
+        log.push_str("using rootless Linux namespace backend\n");
+        return Ok(LinuxExecutionBackend::Namespaced(
+            LinuxNamespaceBackend::RootlessUser,
+        ));
+    }
+
+    log.push_str("rootless Linux namespace backend unavailable:\n");
+    log.push_str(&render_linux_namespace_probe_failure(&rootless));
+    log.push('\n');
+    if !strict {
+        log.push_str("falling back to host-staged BUILD_ROOT SYSTEM backend\n");
+        return Ok(LinuxExecutionBackend::HostStaged);
+    }
+
+    bail!(
+        "{} requires Linux namespace isolation.\nrootless user namespaces are unavailable:\n{}\nhost-staged fallback is not valid for {}.\nEnable unprivileged user namespaces, or run with {DEPOS_LINUX_ISOLATION_ENV}=privileged from a process with CAP_SYS_ADMIN.",
+        build_root_label(&spec.build_root),
+        render_linux_namespace_probe_failure(&rootless),
+        build_root_label(&spec.build_root)
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn render_linux_namespace_probe_failure(probe: &LinuxNamespaceProbe) -> String {
+    let mut message = String::new();
+    message.push_str("  ");
+    message.push_str(&render_linux_namespace_probe_command(probe.disable_network));
+    if let Some(status) = probe.status {
+        message.push_str(&format!("\n  exited with status {status}"));
+    } else {
+        message.push_str("\n  failed to spawn");
+    }
+    let stderr = probe.stderr.trim();
+    if !stderr.is_empty() {
+        message.push_str(": ");
+        message.push_str(stderr);
+    }
+    message
+}
+
+#[cfg(target_os = "linux")]
+fn render_linux_namespace_probe_command(disable_network: bool) -> String {
+    let mut parts = vec![
+        "unshare",
+        "--fork",
+        "--user",
+        "--map-root-user",
+        "--pid",
+        "--mount",
+        "--uts",
+        "--ipc",
+    ];
+    if disable_network {
+        parts.push("--net");
+    }
+    parts.extend(["--", "true"]);
+    parts.join(" ")
+}
+
+#[cfg(target_os = "linux")]
+fn rootless_runtime_failure_allows_system_fallback(error: &str, execution_log: &str) -> bool {
+    let combined = format!("{error}\n{execution_log}").to_ascii_lowercase();
+    let namespace_failure = combined.contains("bind mount ")
+        || combined.contains("mount proc for container command")
+        || combined.contains("mount binfmt_misc for container command")
+        || combined.contains("failed to chroot into")
+        || combined.contains("host mount namespace")
+        || combined.contains("metalor_private_ns")
+        || combined.contains("failed to spawn isolated depos internal-run command");
+    let permission_failure = combined.contains("operation not permitted")
+        || combined.contains("permission denied")
+        || combined.contains("not permitted");
+    namespace_failure && permission_failure
+}
+
+#[cfg(target_os = "linux")]
 fn execute_command_pipeline(
     depos_root: &Path,
     store_root: &Path,
     spec: &PackageSpec,
     executable: &Path,
     source_root: &Path,
+    log: &mut String,
+) -> Result<Vec<PathBuf>> {
+    validate_supported_command_pipeline(spec)?;
+    let mode = parse_linux_isolation_request()?;
+    let disable_network = false;
+    let backend = select_linux_backend(spec, disable_network, mode, log)?;
+    match backend {
+        LinuxExecutionBackend::Namespaced(namespace_backend) => {
+            let log_start = log.len();
+            match execute_linux_namespaced_command_pipeline(
+                depos_root,
+                store_root,
+                spec,
+                executable,
+                source_root,
+                namespace_backend,
+                log,
+            ) {
+                Ok(paths) => Ok(paths),
+                Err(error)
+                    if mode == LinuxIsolationRequest::Auto
+                        && namespace_backend == LinuxNamespaceBackend::RootlessUser
+                        && !strict_root_required(spec)
+                        && rootless_runtime_failure_allows_system_fallback(
+                            &format!("{error:#}"),
+                            &log[log_start..],
+                        ) =>
+                {
+                    log.push_str(&format!(
+                        "rootless Linux namespace backend failed during execution: {error:#}\n"
+                    ));
+                    log.push_str("falling back to host-staged BUILD_ROOT SYSTEM backend\n");
+                    execute_linux_host_staged_system_pipeline(
+                        depos_root,
+                        store_root,
+                        spec,
+                        source_root,
+                        log,
+                    )
+                }
+                Err(error) => Err(error),
+            }
+        }
+        LinuxExecutionBackend::HostStaged => execute_linux_host_staged_system_pipeline(
+            depos_root,
+            store_root,
+            spec,
+            source_root,
+            log,
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn execute_linux_namespaced_command_pipeline(
+    depos_root: &Path,
+    store_root: &Path,
+    spec: &PackageSpec,
+    executable: &Path,
+    source_root: &Path,
+    namespace_backend: LinuxNamespaceBackend,
     log: &mut String,
 ) -> Result<Vec<PathBuf>> {
     validate_supported_command_pipeline(spec)?;
@@ -1335,6 +1567,7 @@ fn execute_command_pipeline(
         emulator: emulator.as_deref(),
         base_env: &base_env,
         variables: &variables,
+        namespace_backend,
     };
 
     let provider_bootstrap = linux_provider_bootstrap_commands(spec)?;
@@ -1399,6 +1632,119 @@ fn execute_command_pipeline(
     }
 
     copy_declared_exports(depos_root, &work_prefix, store_root, spec, log)
+}
+
+#[cfg(target_os = "linux")]
+fn execute_linux_host_staged_system_pipeline(
+    depos_root: &Path,
+    store_root: &Path,
+    spec: &PackageSpec,
+    source_root: &Path,
+    log: &mut String,
+) -> Result<Vec<PathBuf>> {
+    validate_supported_command_pipeline(spec)?;
+    if strict_root_required(spec) {
+        bail!("host-staged backend is only valid for BUILD_ROOT SYSTEM");
+    }
+
+    let variant = variant_for_target_arch(&spec.target_arch)?;
+    let variant_root = depos_root.join("store").join(&variant);
+    let dependency_specs = resolve_dependency_specs(depos_root, spec)?;
+    let runtime_root_prefix = depos_root.join(".run").join("metalor-runtime");
+    let runtime_package_root = runtime_root_prefix
+        .join(&spec.name)
+        .join(&spec.namespace)
+        .join(&spec.version);
+    if runtime_package_root.exists() {
+        fs::remove_dir_all(&runtime_package_root)
+            .with_context(|| format!("failed to remove {}", runtime_package_root.display()))?;
+    }
+    fs::create_dir_all(&runtime_package_root)
+        .with_context(|| format!("failed to create {}", runtime_package_root.display()))?;
+
+    let job_root = runtime_package_root.join("job");
+    let cache_root = runtime_package_root.join("cache");
+    let cache_build = cache_root.join("build");
+    let cache_prefix = cache_root.join("prefix");
+    let cache_tmp = cache_root.join("tmp");
+    let build_cell = build_portable_command_cell(
+        &runtime_package_root,
+        &cache_build,
+        &cache_prefix,
+        &cache_tmp,
+        &variant_root,
+        source_root,
+        &dependency_specs,
+    )?;
+    prepare_host_staged_build_cell(&job_root, &build_cell, log)?;
+    let paths = portable_command_paths(&job_root)?;
+    let variables = build_portable_command_variables(spec, &dependency_specs, &paths)?;
+    let base_env = build_portable_command_environment(spec, &dependency_specs, &paths);
+
+    execute_portable_command_phase(
+        spec,
+        &paths,
+        &base_env,
+        &variables,
+        default_phase_cwd(spec, "CONFIGURE"),
+        "CONFIGURE",
+        &spec.configure,
+        log,
+    )?;
+    execute_portable_command_phase(
+        spec,
+        &paths,
+        &base_env,
+        &variables,
+        default_phase_cwd(spec, "BUILD"),
+        "BUILD",
+        &spec.build,
+        log,
+    )?;
+    execute_portable_command_phase(
+        spec,
+        &paths,
+        &base_env,
+        &variables,
+        default_phase_cwd(spec, "INSTALL"),
+        "INSTALL",
+        &spec.install,
+        log,
+    )?;
+
+    sync_host_staged_build_cell_caches(&build_cell, &job_root, log)?;
+
+    apply_stage_entries(
+        &paths.source_dir,
+        &cache_build,
+        &cache_prefix,
+        &spec.stage_entries,
+        log,
+    )?;
+
+    if spec.build_system == BuildSystem::Manual
+        && spec.install.is_empty()
+        && spec.stage_entries.is_empty()
+    {
+        return copy_declared_exports_from_candidates(
+            depos_root,
+            &[
+                ExportCandidateRoot {
+                    label: "build",
+                    root: &cache_build,
+                },
+                ExportCandidateRoot {
+                    label: "source",
+                    root: &paths.source_dir,
+                },
+            ],
+            store_root,
+            spec,
+            log,
+        );
+    }
+
+    copy_declared_exports(depos_root, &cache_prefix, store_root, spec, log)
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1560,7 +1906,7 @@ fn prepare_command_container_root(
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 struct PortableCommandPaths {
     job_root: PathBuf,
     source_dir: PathBuf,
@@ -1570,7 +1916,7 @@ struct PortableCommandPaths {
     tmp_dir: PathBuf,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn portable_command_paths(job_root: &Path) -> Result<PortableCommandPaths> {
     let normalized_job_root = normalize_host_path(job_root);
     Ok(PortableCommandPaths {
@@ -1583,7 +1929,7 @@ fn portable_command_paths(job_root: &Path) -> Result<PortableCommandPaths> {
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn portable_cell_host_path(job_root: &Path, cell_path: &str) -> Result<PathBuf> {
     if !cell_path.starts_with('/') {
         bail!("portable build-cell path must be absolute: {cell_path}");
@@ -1599,7 +1945,7 @@ fn portable_cell_host_path(job_root: &Path, cell_path: &str) -> Result<PathBuf> 
     Ok(normalize_host_path(&output))
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn portable_dependency_root(job_root: &Path, dependency: &PackageSpec) -> Result<PathBuf> {
     portable_cell_host_path(
         job_root,
@@ -1611,7 +1957,7 @@ fn portable_dependency_root(job_root: &Path, dependency: &PackageSpec) -> Result
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn build_portable_command_cell(
     runtime_package_root: &Path,
     cache_build: &Path,
@@ -1665,7 +2011,154 @@ fn build_portable_command_cell(
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn prepare_host_staged_build_cell(
+    job_root: &Path,
+    spec: &BuildCellSpec,
+    log: &mut String,
+) -> Result<()> {
+    if job_root.exists() {
+        fs::remove_dir_all(job_root).with_context(|| {
+            format!(
+                "failed to reset host-staged job root {}",
+                job_root.display()
+            )
+        })?;
+    }
+    fs::create_dir_all(job_root).with_context(|| {
+        format!(
+            "failed to create host-staged job root {}",
+            job_root.display()
+        )
+    })?;
+
+    let workspace = portable_cell_host_path(job_root, spec.workspace_path.as_str())?;
+    fs::create_dir_all(&workspace)
+        .with_context(|| format!("failed to create {}", workspace.display()))?;
+    match &spec.workspace_seed {
+        WorkspaceSeed::Empty => {}
+        WorkspaceSeed::SnapshotDir(source) => copy_host_staged_directory_contents(
+            source.as_path(),
+            &workspace,
+            source.as_path(),
+            log,
+        )?,
+        WorkspaceSeed::Archive(path) => bail!(
+            "host-staged Linux SYSTEM fallback does not support archive workspace seeds: {}",
+            path.as_path().display()
+        ),
+    }
+
+    for import in &spec.imports {
+        let destination = portable_cell_host_path(job_root, import.destination.as_str())?;
+        copy_host_staged_path(
+            import.source.as_path(),
+            &destination,
+            import.source.as_path(),
+            log,
+        )?;
+    }
+    for cache in &spec.caches {
+        let destination = portable_cell_host_path(job_root, cache.destination.as_str())?;
+        if cache.source.as_path().exists() {
+            copy_host_staged_path(
+                cache.source.as_path(),
+                &destination,
+                cache.source.as_path(),
+                log,
+            )?;
+        } else {
+            fs::create_dir_all(&destination)
+                .with_context(|| format!("failed to create {}", destination.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn sync_host_staged_build_cell_caches(
+    spec: &BuildCellSpec,
+    job_root: &Path,
+    log: &mut String,
+) -> Result<()> {
+    for cache in &spec.caches {
+        let source = portable_cell_host_path(job_root, cache.destination.as_str())?;
+        copy_host_staged_path(&source, cache.source.as_path(), &source, log)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn copy_host_staged_directory_contents(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    log: &mut String,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("failed to inspect {}", source.display()))?;
+    fs::create_dir_all(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+    for entry in read_dir_sorted(source)? {
+        copy_host_staged_path(
+            &entry.path(),
+            &destination.join(entry.file_name()),
+            source_root,
+            log,
+        )?;
+    }
+    fs::set_permissions(destination, metadata.permissions())
+        .with_context(|| format!("failed to set permissions on {}", destination.display()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn copy_host_staged_path(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    log: &mut String,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("failed to inspect {}", source.display()))?;
+    let file_type = metadata.file_type();
+    remove_existing_path(destination)?;
+    if file_type.is_symlink() {
+        copy_symlink(source, destination, source_root, log)?;
+        return Ok(());
+    }
+    if file_type.is_dir() {
+        copy_host_staged_directory_contents(source, destination, source_root, log)?;
+        return Ok(());
+    }
+    if !file_type.is_file() {
+        bail!(
+            "host-staged source '{}' is not a file, directory, or symlink",
+            source.display()
+        );
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    log.push_str(&format!(
+        "copy file {} -> {}\n",
+        source.display(),
+        destination.display()
+    ));
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    fs::set_permissions(destination, metadata.permissions())
+        .with_context(|| format!("failed to set permissions on {}", destination.display()))?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn build_portable_command_variables(
     spec: &PackageSpec,
     dependency_specs: &[PackageSpec],
@@ -1684,6 +2177,17 @@ fn build_portable_command_variables(
     variables.insert("DEPO_DEPS_DIR".to_string(), display_path(&paths.deps_dir));
     variables.insert("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone());
     variables.insert("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone());
+    #[cfg(target_os = "linux")]
+    {
+        variables.insert(
+            "DEPO_BUILD_TRIPLE".to_string(),
+            linux_gnu_target_triple(&spec.build_arch).to_string(),
+        );
+        variables.insert(
+            "DEPO_TARGET_TRIPLE".to_string(),
+            linux_gnu_target_triple(&spec.target_arch).to_string(),
+        );
+    }
     for dependency in dependency_specs {
         let root = display_path(&portable_dependency_root(&paths.job_root, dependency)?);
         let namespaced_key = format!("dep:{}@{}", dependency.name, dependency.namespace);
@@ -1705,7 +2209,7 @@ fn build_portable_command_variables(
     Ok(variables)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn build_portable_command_environment(
     spec: &PackageSpec,
     dependency_specs: &[PackageSpec],
@@ -1736,6 +2240,19 @@ fn build_portable_command_environment(
         ("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone()),
         ("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone()),
     ];
+    #[cfg(target_os = "linux")]
+    {
+        env.extend([
+            (
+                "DEPO_BUILD_TRIPLE".to_string(),
+                linux_gnu_target_triple(&spec.build_arch).to_string(),
+            ),
+            (
+                "DEPO_TARGET_TRIPLE".to_string(),
+                linux_gnu_target_triple(&spec.target_arch).to_string(),
+            ),
+        ]);
+    }
     #[cfg(target_os = "windows")]
     {
         let tmp = display_path(&paths.tmp_dir);
@@ -1818,8 +2335,21 @@ fn build_portable_command_environment(
     env
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn default_system_tool_environment() -> Vec<(String, String)> {
+    #[cfg(target_os = "linux")]
+    {
+        return vec![
+            ("CC".to_string(), "cc".to_string()),
+            ("CXX".to_string(), "c++".to_string()),
+            ("AR".to_string(), "ar".to_string()),
+            ("RANLIB".to_string(), "ranlib".to_string()),
+            ("STRIP".to_string(), "strip".to_string()),
+            ("CFLAGS".to_string(), String::new()),
+            ("CXXFLAGS".to_string(), String::new()),
+            ("LDFLAGS".to_string(), String::new()),
+        ];
+    }
     #[cfg(target_os = "macos")]
     {
         return vec![
@@ -1895,7 +2425,7 @@ fn default_system_tool_environment() -> Vec<(String, String)> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn execute_portable_command_phase(
     spec: &PackageSpec,
     paths: &PortableCommandPaths,
@@ -1960,7 +2490,7 @@ fn execute_portable_command_phase(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn translate_portable_phase_executable(job_root: &Path, executable: &str) -> Result<PathBuf> {
     let is_cell_path = [
         CELL_SOURCE_DIR,
@@ -2632,6 +3162,7 @@ struct PhaseExecutionContext<'a> {
     emulator: Option<&'a str>,
     base_env: &'a [(String, String)],
     variables: &'a BTreeMap<String, String>,
+    namespace_backend: LinuxNamespaceBackend,
 }
 
 #[cfg(target_os = "linux")]
@@ -2683,6 +3214,7 @@ fn execute_command_phase(
             context.executable,
             context.runtime_root_prefix,
             &request,
+            context.namespace_backend,
             log,
         )?;
     }
@@ -2808,10 +3340,16 @@ fn run_isolated_phase(
     executable: &Path,
     runtime_root_prefix: &Path,
     request: &ContainerRunCommand,
+    namespace_backend: LinuxNamespaceBackend,
     log: &mut String,
 ) -> Result<()> {
-    let mut command =
-        build_unshare_reexec_command(executable, "internal-run", runtime_root_prefix, request)?;
+    let mut command = build_unshare_reexec_command_with_backend(
+        executable,
+        "internal-run",
+        runtime_root_prefix,
+        request,
+        namespace_backend,
+    )?;
     let output = command
         .output()
         .context("failed to spawn isolated depos internal-run command")?;

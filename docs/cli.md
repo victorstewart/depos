@@ -5,10 +5,10 @@
 ## Install
 
 ```bash
-cargo install depos --version 0.5.0
+cargo install depos --version 0.5.1
 ```
 
-If you are using `.depos.cmake`, you can also let it bootstrap `depos 0.5.0` locally on first use instead of preinstalling it.
+If you are using `.depos.cmake`, you can also let it bootstrap `depos 0.5.1` locally on first use instead of preinstalling it.
 
 ## Core Commands
 
@@ -73,6 +73,17 @@ On macOS and Windows, `BUILD_ROOT OCI <image>` enters the local Linux-provider p
 The provider runtime root keeps `provider-metadata.env` plus versioned bootstrap state and caches so the Linux-side runtime can be inspected directly.
 
 On macOS and Windows, `depos` still rejects Linux-only advanced requests without `BUILD_ROOT OCI <image>`.
+
+## Linux Native Isolation Knobs
+
+On Linux, package command builds use `DEPOS_LINUX_ISOLATION`:
+
+- `auto`: default; try rootless user namespaces first
+- `rootless`: require rootless user namespaces
+- `host`: force host-staged execution, valid only for `BUILD_ROOT SYSTEM`
+- `privileged`: use privileged namespaces, requiring `CAP_SYS_ADMIN`
+
+When auto mode cannot create rootless namespaces, `BUILD_ROOT SYSTEM` falls back to host-staged execution. `BUILD_ROOT SCRATCH` and `BUILD_ROOT OCI <image>` fail instead of weakening their root contract.
 
 ## Resolution Order In CMake
 

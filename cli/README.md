@@ -5,7 +5,7 @@
 Install it directly with:
 
 ```bash
-cargo install depos --version 0.5.0
+cargo install depos --version 0.5.1
 ```
 
 Use the CLI when you want to register recipes, sync manifests, or inspect repository state outside of the CMake helper flow.
@@ -37,6 +37,13 @@ depos sync --depos-root "$PWD/.deps/depos" --manifest /path/to/deps.cmake
 - Linux: `BUILD_ROOT SYSTEM`, `BUILD_ROOT SCRATCH`, `BUILD_ROOT OCI <ref>`, `TOOLCHAIN ROOTFS`, and foreign-architecture OCI execution
 - macOS: native `BUILD_ROOT SYSTEM` plus [EXPERIMENTAL] `BUILD_ROOT OCI <ref>` through a local Linux provider
 - Windows: native `BUILD_ROOT SYSTEM` plus [EXPERIMENTAL] `BUILD_ROOT OCI <ref>` through a local Linux provider
+
+On Linux, namespace isolation is selected by `DEPOS_LINUX_ISOLATION`:
+
+- `auto` tries rootless user namespaces first and is the default
+- `rootless` requires rootless user namespaces
+- `host` forces host-staged execution and is valid only for `BUILD_ROOT SYSTEM`
+- `privileged` uses the privileged namespace backend and requires the process to have `CAP_SYS_ADMIN`
 
 On macOS and Windows, `depos` still explicitly rejects:
 

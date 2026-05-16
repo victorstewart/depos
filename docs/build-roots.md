@@ -41,6 +41,8 @@ Implemented today:
 - macOS native execution with `BUILD_ROOT SYSTEM`
 - Windows native execution with `BUILD_ROOT SYSTEM`
 
+On Linux, `DEPOS_LINUX_ISOLATION=auto` is the default. It probes the exact rootless user-namespace shape first, uses it when available, and falls back to host-staged execution only for `BUILD_ROOT SYSTEM`. `BUILD_ROOT SCRATCH` and `BUILD_ROOT OCI <ref>` require namespace isolation and fail clearly if rootless namespaces are unavailable. Set `DEPOS_LINUX_ISOLATION=privileged` to opt into the privileged namespace backend from a process with `CAP_SYS_ADMIN`.
+
 [EXPERIMENTAL] On macOS and Windows, selecting `BUILD_ROOT OCI <ref>` now routes the package through a local Linux provider instead of trying to emulate Linux isolation in the host-native backend:
 
 - Windows: WSL2
