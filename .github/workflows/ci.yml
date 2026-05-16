@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           log="$(mktemp)"
-          if ! sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" test --locked --manifest-path cli/Cargo.toml -j"$(nproc)" 2>&1 | tee "$log"; then
+          if ! cargo test --locked --manifest-path cli/Cargo.toml -j"$(nproc)" 2>&1 | tee "$log"; then
             echo "::error::Linux cargo test failed; recent output follows"
             mapfile -t tail_lines < <(tail -n 60 "$log")
             printf '%s\n' "${tail_lines[@]}"
@@ -89,7 +89,7 @@ jobs:
       - name: Cargo package
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME "$(command -v cargo)" package --allow-dirty --locked --manifest-path cli/Cargo.toml
+        run: cargo package --allow-dirty --locked --manifest-path cli/Cargo.toml
 
       - name: Check generated depofiles
         if: runner.os == 'Linux'
@@ -100,9 +100,9 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME cmake --fresh -S . -B build/ci-linux -DBUILD_TESTING=ON
-          sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME cmake --build build/ci-linux --parallel
-          sudo --preserve-env=HOME,PATH,CARGO_HOME,RUSTUP_HOME ctest --test-dir build/ci-linux --output-on-failure --no-tests=error --parallel
+          cmake --fresh -S . -B build/ci-linux -DBUILD_TESTING=ON
+          cmake --build build/ci-linux --parallel
+          ctest --test-dir build/ci-linux --output-on-failure --no-tests=error --parallel
 
       - name: Repo CMake smoke (macOS)
         if: runner.os == 'macOS'
