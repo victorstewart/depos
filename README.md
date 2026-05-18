@@ -26,7 +26,7 @@ depos_depend(itoa)
 depos_link(app itoa)
 ```
 
-`.depos.cmake` is the low-friction path. By default it bootstraps `depos 0.5.2` locally on first use.
+`.depos.cmake` is the low-friction path. By default it bootstraps `depos 0.5.3` locally on first use.
 
 If you publish a library for others to consume through `depos`, ship one detached top-level
 published `DepoFile` outside your source archive. That published `DepoFile` should point at

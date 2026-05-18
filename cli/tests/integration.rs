@@ -981,7 +981,7 @@ fn sync_materializes_autoconf_build_system_package() {
     sandbox.write(
         "depofiles/local/autoconf_demo/release/1.0.0/main.DepoFile",
         &format!(
-            "NAME autoconf_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nBUILD_SYSTEM AUTOCONF\nSOURCE GIT {} HEAD\nAUTOCONF_CONFIGURE_SH <<'EOF'\ntest \"$PWD\" = \"$DEPO_SOURCE_DIR\"\ntest \"$CC\" = clang\ntest \"$CXX\" = clang++\ntest \"$AR\" = ar\ntest \"$RANLIB\" = ranlib\ntest \"$STRIP\" = strip\n./configure --prefix=\"$DEPO_PREFIX\" --libdir=\"$DEPO_PREFIX/lib\"\nEOF\nTARGET autoconf_demo::autoconf_demo STATIC lib/libautoconf_demo.a INTERFACE include\n",
+            "NAME autoconf_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nBUILD_SYSTEM AUTOCONF\nSOURCE GIT {} HEAD\nAUTOCONF_CONFIGURE_SH <<'EOF'\ntest \"$PWD\" = \"$DEPO_SOURCE_DIR\"\ntest \"$CC\" = cc\ntest \"$CXX\" = c++\ntest \"$AR\" = ar\ntest \"$RANLIB\" = ranlib\ntest \"$STRIP\" = strip\n./configure --prefix=\"$DEPO_PREFIX\" --libdir=\"$DEPO_PREFIX/lib\"\nEOF\nTARGET autoconf_demo::autoconf_demo STATIC lib/libautoconf_demo.a INTERFACE include\n",
             upstream.display()
         ),
     );
@@ -1181,7 +1181,7 @@ fn sync_materializes_cargo_build_system_package() {
     sandbox.write(
         "depofiles/local/cargo_demo/release/1.0.0/main.DepoFile",
         &format!(
-            "NAME cargo_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nBUILD_SYSTEM CARGO\nSOURCE GIT {} HEAD\nCARGO_BUILD_SH <<'EOF'\ntest \"$PWD\" = \"$DEPO_SOURCE_DIR\"\ntest \"$CC\" = clang\ntest \"$CARGO_HOME\" = \"$DEPO_BUILD_DIR/cargo-home\"\ncargo build --release --target-dir \"$DEPO_BUILD_DIR/cargo-target\"\nEOF\nSTAGE_FILE BUILD cargo-target/release/libcargo_demo.a lib/libcargo_demo.a\nTARGET cargo_demo::cargo_demo STATIC lib/libcargo_demo.a\n",
+            "NAME cargo_demo\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nBUILD_SYSTEM CARGO\nSOURCE GIT {} HEAD\nCARGO_BUILD_SH <<'EOF'\ntest \"$PWD\" = \"$DEPO_SOURCE_DIR\"\ntest \"$CC\" = cc\ntest \"$CARGO_HOME\" = \"$DEPO_BUILD_DIR/cargo-home\"\ncargo build --release --target-dir \"$DEPO_BUILD_DIR/cargo-target\"\nEOF\nSTAGE_FILE BUILD cargo-target/release/libcargo_demo.a lib/libcargo_demo.a\nTARGET cargo_demo::cargo_demo STATIC lib/libcargo_demo.a\n",
             upstream.display()
         ),
     );

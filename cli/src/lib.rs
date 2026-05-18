@@ -2930,8 +2930,8 @@ fn build_command_environment(
     ];
     if spec.toolchain == ToolchainSource::System {
         env.extend([
-            ("CC".to_string(), "clang".to_string()),
-            ("CXX".to_string(), "clang++".to_string()),
+            ("CC".to_string(), "cc".to_string()),
+            ("CXX".to_string(), "c++".to_string()),
             ("AR".to_string(), "ar".to_string()),
             ("RANLIB".to_string(), "ranlib".to_string()),
             ("STRIP".to_string(), "strip".to_string()),
