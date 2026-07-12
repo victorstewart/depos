@@ -7,13 +7,66 @@ use depos::{host_arch, sync_registry, SyncOptions};
 use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use tar::Builder;
 use tempfile::TempDir;
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipWriter};
 
 const RELEASE_NAMESPACE: &str = "release";
+
+#[test]
+fn sync_extracts_exact_multi_root_db_zip_url_source() {
+    let sandbox = Sandbox::new();
+    let archive = sandbox.create_zip_archive(
+        "upstreams/db.zip",
+        &[
+            ("out/country21.bin", "current country\n"),
+            ("out/timezone21.bin", "current timezone\n"),
+            ("out_v1/country21.bin", "v1 country\n"),
+            ("out_v1/timezone21.bin", "v1 timezone\n"),
+        ],
+    );
+    sandbox.write(
+        "depofiles/local/db/release/18.1.40/main.DepoFile",
+        &format!(
+            "NAME db\nVERSION 18.1.40\nSYSTEM_LIBS INHERIT\nSOURCE URL {}\nTARGET db::db INTERFACE out out_v1\n",
+            portable_file_url(&archive)
+        ),
+    );
+    sandbox.write("manifests/db.cmake", "depos_require(db VERSION 18.1.40)\n");
+
+    sync_registry(&SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox.depos_root().join("manifests/db.cmake"),
+        executable: None,
+    })
+    .expect("sync should materialize db.zip URL source");
+
+    assert_eq!(
+        fs::read_to_string(sandbox.package_store_path(
+            "db",
+            RELEASE_NAMESPACE,
+            "18.1.40",
+            "out/timezone21.bin",
+        ))
+        .expect("read extracted current db"),
+        "current timezone\n"
+    );
+    assert_eq!(
+        fs::read_to_string(sandbox.package_store_path(
+            "db",
+            RELEASE_NAMESPACE,
+            "18.1.40",
+            "out_v1/timezone21.bin",
+        ))
+        .expect("read extracted v1 db"),
+        "v1 timezone\n"
+    );
+}
 
 #[test]
 fn sync_builds_cargo_package_with_native_portable_backend() {
@@ -1349,6 +1402,28 @@ impl Sandbox {
                 .expect("append archive entry");
         }
         builder.finish().expect("finish archive");
+        archive_path
+    }
+
+    fn create_zip_archive(&self, relative: &str, files: &[(&str, &str)]) -> PathBuf {
+        let archive_path = self.root.path().join(relative);
+        if let Some(parent) = archive_path.parent() {
+            fs::create_dir_all(parent).expect("create ZIP archive parent");
+        }
+        let archive_file = File::create(&archive_path).expect("create ZIP archive");
+        let mut archive = ZipWriter::new(archive_file);
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+        for (path, contents) in files {
+            archive
+                .start_file(*path, options)
+                .expect("add ZIP archive entry");
+            archive
+                .write_all(contents.as_bytes())
+                .expect("write ZIP archive entry");
+        }
+        archive.finish().expect("finish ZIP archive");
         archive_path
     }
 

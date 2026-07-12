@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::{self, Display};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -3749,6 +3750,11 @@ fn resolve_url_source(
 }
 
 fn prepare_url_source(archive_path: &Path, source_root: &Path, log: &mut String) -> Result<()> {
+    let archive_kind = archive_kind(archive_path)?;
+    let zip_entries = match archive_kind {
+        ArchiveKind::Tar => None,
+        ArchiveKind::Zip => Some(validate_zip_archive(archive_path)?),
+    };
     if source_root.exists() {
         fs::remove_dir_all(source_root)
             .with_context(|| format!("failed to remove {}", source_root.display()))?;
@@ -3760,6 +3766,9 @@ fn prepare_url_source(archive_path: &Path, source_root: &Path, log: &mut String)
         archive_path.display(),
         source_root.display()
     ));
+    if let Some(entries) = zip_entries {
+        return extract_zip_archive(archive_path, source_root, &entries);
+    }
     run_command(
         log,
         None,
@@ -3822,6 +3831,46 @@ fn file_url_path(url: &str) -> Option<PathBuf> {
 }
 
 fn validate_archive_entries(archive_path: &Path) -> Result<()> {
+    match archive_kind(archive_path)? {
+        ArchiveKind::Tar => validate_tar_archive_entries(archive_path),
+        ArchiveKind::Zip => validate_zip_archive(archive_path).map(|_| ()),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArchiveKind {
+    Tar,
+    Zip,
+}
+
+fn archive_kind(archive_path: &Path) -> Result<ArchiveKind> {
+    if archive_path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+    {
+        return Ok(ArchiveKind::Zip);
+    }
+
+    let mut signature = [0_u8; 4];
+    let mut archive = fs::File::open(archive_path)
+        .with_context(|| format!("failed to open archive {}", archive_path.display()))?;
+    let read = archive
+        .read(&mut signature)
+        .with_context(|| format!("failed to inspect archive {}", archive_path.display()))?;
+    if read == signature.len()
+        && matches!(
+            signature,
+            [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8]
+        )
+    {
+        Ok(ArchiveKind::Zip)
+    } else {
+        Ok(ArchiveKind::Tar)
+    }
+}
+
+fn validate_tar_archive_entries(archive_path: &Path) -> Result<()> {
     let executable_path = resolve_command_path("tar");
     let output = Command::new(&executable_path)
         .args([
@@ -3843,6 +3892,342 @@ fn validate_archive_entries(archive_path: &Path) -> Result<()> {
         String::from_utf8(output.stdout).context("archive member list was not valid utf-8")?;
     for entry in listing.lines().filter(|line| !line.is_empty()) {
         ensure_archive_member_path_safe(Path::new(entry), archive_path)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ZipEntryKind {
+    Directory,
+    File,
+}
+
+#[derive(Clone, Debug)]
+struct ValidatedZipEntry {
+    index: usize,
+    path: PathBuf,
+    kind: ZipEntryKind,
+    unix_mode: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+struct ZipPathNode {
+    path: PathBuf,
+    kind: ZipEntryKind,
+    explicit: bool,
+}
+
+fn validate_zip_archive(archive_path: &Path) -> Result<Vec<ValidatedZipEntry>> {
+    let archive_file = fs::File::open(archive_path)
+        .with_context(|| format!("failed to open ZIP archive {}", archive_path.display()))?;
+    let mut archive = zip::ZipArchive::new(archive_file)
+        .with_context(|| format!("failed to read ZIP archive {}", archive_path.display()))?;
+    let mut entries = Vec::with_capacity(archive.len());
+
+    for index in 0..archive.len() {
+        let entry = archive.by_index_raw(index).with_context(|| {
+            format!(
+                "failed to read ZIP archive '{}' entry {index}",
+                archive_path.display()
+            )
+        })?;
+        let name = entry.name();
+        let context = format!("ZIP archive '{}' entry '{}'", archive_path.display(), name);
+        let kind = validate_zip_entry_kind(&entry, &context)?;
+        let path = zip_entry_path(name, &context)?;
+        entries.push(ValidatedZipEntry {
+            index,
+            path,
+            kind,
+            unix_mode: entry.unix_mode(),
+        });
+    }
+
+    let strip_root = zip_common_root(&entries);
+    let mut paths = BTreeMap::<String, ZipPathNode>::new();
+    let mut validated = Vec::with_capacity(entries.len());
+    for mut entry in entries {
+        if strip_root {
+            entry.path = entry.path.components().skip(1).collect();
+            if entry.path.as_os_str().is_empty() {
+                continue;
+            }
+        }
+        let context = format!(
+            "ZIP archive '{}' output '{}'",
+            archive_path.display(),
+            entry.path.display()
+        );
+        register_zip_path(&mut paths, &entry.path, entry.kind, &context)?;
+        validated.push(entry);
+    }
+    Ok(validated)
+}
+
+fn zip_common_root(entries: &[ValidatedZipEntry]) -> bool {
+    let Some(root) = entries
+        .first()
+        .and_then(|entry| entry.path.components().next())
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+    else {
+        return false;
+    };
+    entries
+        .iter()
+        .any(|entry| entry.path.components().count() > 1)
+        && entries.iter().all(|entry| {
+            entry.path.components().next().is_some_and(|component| {
+                component.as_os_str().to_string_lossy().to_ascii_lowercase() == root
+            }) && (entry.path.components().count() > 1 || entry.kind == ZipEntryKind::Directory)
+        })
+}
+
+fn validate_zip_entry_kind(
+    entry: &zip::read::ZipFile<'_, fs::File>,
+    context: &str,
+) -> Result<ZipEntryKind> {
+    const FILE_TYPE_MASK: u32 = 0o170000;
+    const DIRECTORY: u32 = 0o040000;
+    const REGULAR_FILE: u32 = 0o100000;
+    const SYMLINK: u32 = 0o120000;
+
+    if !matches!(
+        entry.compression(),
+        zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated
+    ) {
+        bail!(
+            "{context} uses unsupported ZIP compression method {:?}; only Stored and Deflated are supported",
+            entry.compression()
+        );
+    }
+    if entry.encrypted() {
+        bail!("{context} is encrypted; encrypted ZIP entries are not supported");
+    }
+    let kind = if entry.is_dir() {
+        ZipEntryKind::Directory
+    } else {
+        ZipEntryKind::File
+    };
+    if entry.is_symlink() {
+        bail!("{context} is a symbolic link; ZIP links are not extracted");
+    }
+    if let Some(mode) = entry.unix_mode() {
+        match (mode & FILE_TYPE_MASK, kind) {
+            (0, _) | (DIRECTORY, ZipEntryKind::Directory) | (REGULAR_FILE, ZipEntryKind::File) => {}
+            (SYMLINK, _) => bail!("{context} is a symbolic link; ZIP links are not extracted"),
+            (file_type, _) => bail!(
+                "{context} has unsupported special file type {file_type:#o}; only regular files and directories are allowed"
+            ),
+        }
+    }
+    Ok(kind)
+}
+
+fn zip_entry_path(name: &str, context: &str) -> Result<PathBuf> {
+    if name.is_empty() || name.contains('\0') {
+        bail!("{context} has an empty or NUL-containing path");
+    }
+    if name.starts_with('/') {
+        bail!("{context} must be relative");
+    }
+    if name.contains('\\') {
+        bail!("{context} contains a backslash path separator");
+    }
+
+    let path = name.strip_suffix('/').unwrap_or(name);
+    let components = path.split('/').collect::<Vec<_>>();
+    if components.iter().any(|component| component.is_empty()) {
+        bail!("{context} contains an empty path component");
+    }
+    if components
+        .iter()
+        .any(|component| matches!(*component, "." | ".."))
+    {
+        bail!("{context} contains '.' or '..' path traversal");
+    }
+    if components.iter().any(|component| component.contains(':')) {
+        bail!("{context} contains a Windows drive or alternate-stream path");
+    }
+    if components
+        .iter()
+        .any(|component| windows_reserved_path_component(component))
+    {
+        bail!("{context} contains a reserved Windows device path");
+    }
+    if components
+        .iter()
+        .any(|component| component.ends_with([' ', '.']))
+    {
+        bail!("{context} contains a path component with a trailing space or dot");
+    }
+
+    Ok(components.iter().collect())
+}
+
+fn windows_reserved_path_component(component: &str) -> bool {
+    let stem = component
+        .split_once('.')
+        .map_or(component, |(stem, _)| stem)
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem.len() == 4
+            && (stem.as_bytes().starts_with(b"COM") || stem.as_bytes().starts_with(b"LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9')
+}
+
+fn zip_path_key(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn register_zip_path(
+    paths: &mut BTreeMap<String, ZipPathNode>,
+    path: &Path,
+    kind: ZipEntryKind,
+    context: &str,
+) -> Result<()> {
+    let components = path.components().collect::<Vec<_>>();
+    let mut ancestor = PathBuf::new();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        ancestor.push(component.as_os_str());
+        let key = zip_path_key(&ancestor);
+        match paths.get(&key) {
+            Some(node) if node.kind == ZipEntryKind::File => bail!(
+                "{context} collides with file '{}' used as a parent path",
+                node.path.display()
+            ),
+            Some(_) => {}
+            None => {
+                paths.insert(
+                    key,
+                    ZipPathNode {
+                        path: ancestor.clone(),
+                        kind: ZipEntryKind::Directory,
+                        explicit: false,
+                    },
+                );
+            }
+        }
+    }
+
+    let key = zip_path_key(path);
+    if let Some(existing) = paths.get_mut(&key) {
+        match (existing.kind, kind, existing.explicit) {
+            (ZipEntryKind::Directory, ZipEntryKind::Directory, false) => {
+                existing.explicit = true;
+                return Ok(());
+            }
+            (ZipEntryKind::Directory, ZipEntryKind::Directory, true) => {
+                bail!(
+                    "{context} duplicates directory '{}'",
+                    existing.path.display()
+                )
+            }
+            _ => bail!(
+                "{context} collides with archive path '{}'",
+                existing.path.display()
+            ),
+        }
+    }
+
+    if kind == ZipEntryKind::File {
+        let prefix = format!("{key}/");
+        if let Some(existing) = paths
+            .iter()
+            .find_map(|(candidate, node)| candidate.starts_with(&prefix).then_some(node))
+        {
+            bail!(
+                "{context} collides with child path '{}'",
+                existing.path.display()
+            );
+        }
+    }
+
+    paths.insert(
+        key,
+        ZipPathNode {
+            path: path.to_path_buf(),
+            kind,
+            explicit: true,
+        },
+    );
+    Ok(())
+}
+
+fn extract_zip_archive(
+    archive_path: &Path,
+    source_root: &Path,
+    entries: &[ValidatedZipEntry],
+) -> Result<()> {
+    let canonical_root = canonical_path(source_root)?;
+    let archive_file = fs::File::open(archive_path)
+        .with_context(|| format!("failed to open ZIP archive {}", archive_path.display()))?;
+    let mut archive = zip::ZipArchive::new(archive_file)
+        .with_context(|| format!("failed to read ZIP archive {}", archive_path.display()))?;
+
+    for planned in entries {
+        let destination = source_root.join(&planned.path);
+        match planned.kind {
+            ZipEntryKind::Directory => fs::create_dir_all(&destination).with_context(|| {
+                format!("failed to create ZIP directory {}", destination.display())
+            })?,
+            ZipEntryKind::File => {
+                let parent = destination
+                    .parent()
+                    .expect("validated ZIP path has a parent");
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create ZIP directory {}", parent.display())
+                })?;
+                let canonical_parent = canonical_path(parent)?;
+                if !canonical_parent.starts_with(&canonical_root) {
+                    bail!(
+                        "ZIP archive '{}' would extract '{}' outside '{}'",
+                        archive_path.display(),
+                        planned.path.display(),
+                        source_root.display()
+                    );
+                }
+                let mut entry = archive.by_index(planned.index).with_context(|| {
+                    format!(
+                        "failed to read ZIP archive '{}' entry {}",
+                        archive_path.display(),
+                        planned.index
+                    )
+                })?;
+                let mut output = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&destination)
+                    .with_context(|| {
+                        format!("failed to create ZIP output {}", destination.display())
+                    })?;
+                std::io::copy(&mut entry, &mut output).with_context(|| {
+                    format!("failed to extract ZIP output {}", destination.display())
+                })?;
+                #[cfg(unix)]
+                if let Some(mode) = planned.unix_mode {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&destination, fs::Permissions::from_mode(mode & 0o777))
+                        .with_context(|| {
+                            format!(
+                                "failed to set ZIP output permissions {}",
+                                destination.display()
+                            )
+                        })?;
+                }
+            }
+        }
+        let canonical_destination = canonical_path(&destination)?;
+        if !canonical_destination.starts_with(&canonical_root) {
+            bail!(
+                "ZIP archive '{}' extracted '{}' outside '{}'",
+                archive_path.display(),
+                planned.path.display(),
+                source_root.display()
+            );
+        }
     }
     Ok(())
 }
@@ -9000,4 +9385,229 @@ fn prune_empty_ancestors(path: &Path, stop_at: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod zip_tests {
+    use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    enum TestEntry<'a> {
+        Directory(&'a str),
+        File(&'a str, &'a [u8]),
+        Symlink(&'a str, &'a str),
+    }
+
+    fn write_zip(path: &Path, entries: &[TestEntry<'_>]) {
+        let file = fs::File::create(path).expect("create ZIP fixture");
+        let mut archive = ZipWriter::new(file);
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .unix_permissions(0o755);
+        for entry in entries {
+            match entry {
+                TestEntry::Directory(name) => archive
+                    .add_directory(*name, options)
+                    .expect("add ZIP directory"),
+                TestEntry::File(name, contents) => {
+                    archive.start_file(*name, options).expect("add ZIP file");
+                    archive.write_all(contents).expect("write ZIP file");
+                }
+                TestEntry::Symlink(name, target) => archive
+                    .add_symlink(*name, *target, options)
+                    .expect("add ZIP symlink"),
+            }
+        }
+        archive.finish().expect("finish ZIP fixture");
+    }
+
+    fn assert_zip_rejected(entries: &[TestEntry<'_>], expected: &str) {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("fixture.zip");
+        write_zip(&archive, entries);
+        let error = validate_zip_archive(&archive).expect_err("unsafe ZIP should fail");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains(expected), "{rendered}");
+    }
+
+    #[test]
+    fn strips_one_shared_wrapped_zip_root() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("db.zip");
+        let source = temp.path().join("source");
+        write_zip(
+            &archive,
+            &[
+                TestEntry::Directory("db-18.1.40/"),
+                TestEntry::Directory("db-18.1.40/build_unix/"),
+                TestEntry::File("db-18.1.40/build_unix/configure", b"#!/bin/sh\n"),
+                TestEntry::File("db-18.1.40/src/db.h", b"/* db */\n"),
+            ],
+        );
+
+        let mut log = String::new();
+        prepare_url_source(&archive, &source, &mut log).expect("extract db.zip fixture");
+
+        assert_eq!(
+            fs::read_to_string(source.join("build_unix/configure")).expect("read configure"),
+            "#!/bin/sh\n"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("src/db.h")).expect("read db header"),
+            "/* db */\n"
+        );
+        assert!(!source.join("db-18.1.40").exists());
+    }
+
+    #[test]
+    fn preserves_exact_multi_root_db_zip_layout() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("db.zip");
+        let source = temp.path().join("source");
+        write_zip(
+            &archive,
+            &[
+                TestEntry::File("out/country21.bin", b"current country"),
+                TestEntry::File("out/timezone21.bin", b"current timezone"),
+                TestEntry::File("out_v1/country21.bin", b"v1 country"),
+                TestEntry::File("out_v1/timezone21.bin", b"v1 timezone"),
+            ],
+        );
+
+        prepare_url_source(&archive, &source, &mut String::new())
+            .expect("extract multi-root db.zip fixture");
+
+        assert_eq!(
+            fs::read(source.join("out/timezone21.bin")).expect("read current database"),
+            b"current timezone"
+        );
+        assert_eq!(
+            fs::read(source.join("out_v1/timezone21.bin")).expect("read v1 database"),
+            b"v1 timezone"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_zip_paths_and_output_collisions() {
+        for (entries, expected) in [
+            (vec![TestEntry::File("/absolute", b"")], "must be relative"),
+            (
+                vec![TestEntry::File("root/../escape", b"")],
+                "path traversal",
+            ),
+            (vec![TestEntry::File("C:/escape", b"")], "Windows drive"),
+            (
+                vec![TestEntry::File("root/C:/escape", b"")],
+                "Windows drive",
+            ),
+            (vec![TestEntry::File("root/C:escape", b"")], "Windows drive"),
+            (vec![TestEntry::File(r"C:\escape", b"")], "backslash"),
+            (vec![TestEntry::File(r"\\server\share", b"")], "backslash"),
+            (
+                vec![TestEntry::File("//server/share", b"")],
+                "must be relative",
+            ),
+            (
+                vec![TestEntry::File("root/file:stream", b"")],
+                "alternate-stream",
+            ),
+            (
+                vec![TestEntry::File("root/CON.txt", b"")],
+                "reserved Windows device",
+            ),
+            (
+                vec![
+                    TestEntry::File("root/include/db.h", b"one"),
+                    TestEntry::File("root/INCLUDE/db.h", b"two"),
+                ],
+                "collides",
+            ),
+            (
+                vec![
+                    TestEntry::File("root/include", b"file"),
+                    TestEntry::File("root/include/db.h", b"child"),
+                ],
+                "parent path",
+            ),
+            (
+                vec![
+                    TestEntry::File("root/include/db.h", b"child"),
+                    TestEntry::File("root/include", b"file"),
+                ],
+                "collides",
+            ),
+        ] {
+            assert_zip_rejected(&entries, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_zip_symlinks_and_special_entries() {
+        assert_zip_rejected(
+            &[TestEntry::Symlink("root/escape", "../../outside")],
+            "symbolic link",
+        );
+
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("special.zip");
+        write_zip(&archive, &[TestEntry::File("root/fifo", b"")]);
+        let mut bytes = fs::read(&archive).expect("read ZIP fixture");
+        let central = bytes
+            .windows(4)
+            .rposition(|window| window == [0x50, 0x4b, 0x01, 0x02])
+            .expect("central directory entry");
+        bytes[central + 5] = 3;
+        bytes[central + 38..central + 42].copy_from_slice(&(0o010600_u32 << 16).to_le_bytes());
+        fs::write(&archive, bytes).expect("patch ZIP special entry mode");
+        let error = validate_zip_archive(&archive).expect_err("special ZIP entry should fail");
+        assert!(format!("{error:#}").contains("unsupported special file type"));
+    }
+
+    #[test]
+    fn rejects_unsupported_compression_before_creating_extraction_root() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("unsupported.zip");
+        let source = temp.path().join("source");
+        write_zip(&archive, &[TestEntry::File("root/file", b"payload")]);
+        let mut bytes = fs::read(&archive).expect("read ZIP fixture");
+        let local = bytes
+            .windows(4)
+            .position(|window| window == [0x50, 0x4b, 0x03, 0x04])
+            .expect("local ZIP header");
+        let central = bytes
+            .windows(4)
+            .position(|window| window == [0x50, 0x4b, 0x01, 0x02])
+            .expect("central ZIP header");
+        bytes[local + 8..local + 10].copy_from_slice(&12_u16.to_le_bytes());
+        bytes[central + 10..central + 12].copy_from_slice(&12_u16.to_le_bytes());
+        fs::write(&archive, bytes).expect("patch ZIP compression method");
+
+        let error = prepare_url_source(&archive, &source, &mut String::new())
+            .expect_err("unsupported ZIP compression should fail before extraction");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("unsupported ZIP compression method"),
+            "{rendered}"
+        );
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn path_traversal_is_rejected_before_extraction() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("escape.zip");
+        let source = temp.path().join("source");
+        let outside = temp.path().join("outside");
+        write_zip(
+            &archive,
+            &[TestEntry::File("root/../../outside", b"escaped")],
+        );
+
+        prepare_url_source(&archive, &source, &mut String::new())
+            .expect_err("traversal ZIP should fail");
+        assert!(!outside.exists());
+        assert!(!source.exists());
+    }
 }

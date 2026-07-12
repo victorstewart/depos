@@ -18,7 +18,7 @@ That is enough for a header-only dependency: name, version, source, and exported
 - `NAME <name>`: package name
 - `VERSION <version>`: package version label
 - `SOURCE GIT <url> <ref>`: Git source with branch, tag, or commit reference
-- `SOURCE URL <url>`: archive source
+- `SOURCE URL <url>`: tar or ZIP archive source; tar extraction strips one component, while ZIP extraction strips one shared wrapper directory and otherwise preserves relative paths
 - `SOURCE_SUBDIR <path>`: build from a subdirectory inside the fetched source tree
 - `DEPENDS <name> VERSION <version>`: consume another package
 
@@ -40,6 +40,9 @@ TARGET cascade_lib::cascade_lib STATIC lib/libcascade_lib.a INTERFACE include
 
 Keep that published `DepoFile` outside `depofiles/` and outside the source archive itself.
 Inside the source archive, keep only the library's dependency recipes under `depofiles/`.
+
+ZIP sources are validated before extraction. Absolute and traversal paths, Windows path
+variants, links and special entries, and duplicate or colliding output paths are rejected.
 
 When a consumer requests the published `DepoFile`, `depos` fetches the source, discovers the
 embedded dependency `DepoFile`s from that fetched source tree, cascades them automatically,
