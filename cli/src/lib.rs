@@ -5172,7 +5172,12 @@ fn reconcile_export_manifest(
     };
     let current_paths = current_paths.iter().cloned().collect::<BTreeSet<_>>();
     let current_store_root = canonical_path(store_root)?;
-    let stale_paths = if previous.store_root == current_store_root {
+    let previous_store_root = if previous.store_root.exists() {
+        canonical_path(&previous.store_root)?
+    } else {
+        previous.store_root.clone()
+    };
+    let stale_paths = if previous_store_root == current_store_root {
         previous
             .paths
             .iter()
@@ -5182,7 +5187,7 @@ fn reconcile_export_manifest(
     } else {
         previous.paths.clone()
     };
-    remove_exported_paths(&previous.store_root, &stale_paths, log)
+    remove_exported_paths(&previous_store_root, &stale_paths, log)
 }
 
 fn write_export_manifest(

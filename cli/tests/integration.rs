@@ -2012,6 +2012,77 @@ fn sync_replaces_stale_owned_exports_and_unregister_cleans_store() {
 }
 
 #[test]
+fn sync_reconciles_exports_through_a_symlinked_store_root() {
+    let sandbox = Sandbox::new();
+    let upstream = sandbox.create_git_repo(
+        "upstreams/symlinked_store_demo",
+        &[("include/symlinked_store_demo/demo.h", "// first\n")],
+    );
+    sandbox.write(
+        "depofiles/local/symlinked_store_demo/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME symlinked_store_demo\nVERSION 1.0.0\nTARGET symlinked_store_demo::symlinked_store_demo INTERFACE include\nSOURCE GIT {} HEAD\n",
+            upstream.display()
+        ),
+    );
+    sandbox.write(
+        "manifests/symlinked_store_demo.cmake",
+        "depos_require(symlinked_store_demo VERSION 1.0.0)\n",
+    );
+    let options = SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/symlinked_store_demo.cmake"),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    };
+
+    sync_registry(&options).expect("first sync should materialize exports");
+
+    let package_root = sandbox
+        .depos_root()
+        .join("store")
+        .join(default_variant())
+        .join("symlinked_store_demo/release/1.0.0");
+    let aliased_package_root = sandbox.depos_root().join("aliased-package-root");
+    symlink(&package_root, &aliased_package_root).expect("create store alias");
+    let export_manifest = sandbox
+        .depos_root()
+        .join(".run/exports/symlinked_store_demo/release/1.0.0.exports");
+    let contents = fs::read_to_string(&export_manifest).expect("read export manifest");
+    let mut lines = contents.lines();
+    lines.next().expect("store root line");
+    fs::write(
+        &export_manifest,
+        format!(
+            "STORE_ROOT {}\n{}\n",
+            aliased_package_root.display(),
+            lines.collect::<Vec<_>>().join("\n")
+        ),
+    )
+    .expect("write aliased export manifest");
+
+    fs::write(
+        upstream.join("include/symlinked_store_demo/demo.h"),
+        "// second\n",
+    )
+    .expect("update export");
+    run_command(&upstream, ["git", "add", "-A"]);
+    run_command(
+        &upstream,
+        ["git", "commit", "--quiet", "-m", "update export"],
+    );
+
+    sync_registry(&options).expect("second sync should preserve current exports");
+
+    assert_eq!(
+        fs::read_to_string(package_root.join("include/symlinked_store_demo/demo.h"))
+            .expect("read rematerialized export"),
+        "// second\n"
+    );
+}
+
+#[test]
 fn sync_rematerializes_when_the_depofile_changes() {
     let sandbox = Sandbox::new();
     let upstream = sandbox.create_git_repo(
