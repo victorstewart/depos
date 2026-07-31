@@ -31,6 +31,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use unicode_normalization::UnicodeNormalization;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod linux_provider;
@@ -41,6 +42,18 @@ const CELL_BUILD_DIR: &str = "/work/build";
 const CELL_PREFIX_DIR: &str = "/work/prefix";
 const CELL_DEPS_DIR: &str = "/depos";
 const CELL_TMP_DIR: &str = "/tmp";
+const DEPENDENCY_ZIP_LIMITS: ZipExtractionLimits = ZipExtractionLimits {
+    archive_bytes: 512 * 1024 * 1024,
+    entries: 100_000,
+    member_bytes: 2 * 1024 * 1024 * 1024,
+    total_bytes: 8 * 1024 * 1024 * 1024,
+    compression_ratio: 1_000,
+    path_bytes: 4_096,
+};
+const DEPENDENCY_DOWNLOAD_LIMITS: UrlDownloadLimits = UrlDownloadLimits {
+    bytes: DEPENDENCY_ZIP_LIMITS.archive_bytes,
+    transfer_timeout: std::time::Duration::from_secs(10 * 60),
+};
 #[cfg(target_os = "linux")]
 const DEPOS_LINUX_ISOLATION_ENV: &str = "DEPOS_LINUX_ISOLATION";
 
@@ -3900,18 +3913,7 @@ fn resolve_url_source(
                 return Ok(actual);
             }
         }
-        download_url_archive(url, archive_path, log)?;
-        let actual = hash_file_sha256(archive_path)?;
-        if actual != expected {
-            bail!(
-                "downloaded archive '{}' sha256 mismatch: expected {}, got {}",
-                archive_path.display(),
-                expected,
-                actual
-            );
-        }
-        validate_archive_entries(archive_path)?;
-        return Ok(actual);
+        return download_and_publish_url_archive(url, archive_path, Some(expected), log);
     }
 
     if let Some(local_path) = file_url_path(url) {
@@ -3925,20 +3927,177 @@ fn resolve_url_source(
             validate_archive_entries(archive_path)?;
             return Ok(expected);
         }
+        return download_and_publish_url_archive(url, archive_path, Some(&expected), log);
     }
 
-    download_url_archive(url, archive_path, log)?;
-    let actual = hash_file_sha256(archive_path)?;
-    validate_archive_entries(archive_path)?;
-    Ok(actual)
+    download_and_publish_url_archive(url, archive_path, None, log)
+}
+
+fn download_and_publish_url_archive(
+    url: &str,
+    archive_path: &Path,
+    expected_sha256: Option<&str>,
+    log: &mut String,
+) -> Result<String> {
+    let temporary = create_archive_download_path(archive_path)?;
+    let result = (|| {
+        download_url_archive(url, &temporary, log)?;
+        let actual = hash_file_sha256(&temporary)?;
+        if let Some(expected) = expected_sha256 {
+            if actual != expected {
+                bail!(
+                    "downloaded archive '{}' sha256 mismatch: expected {}, got {}",
+                    archive_path.display(),
+                    expected,
+                    actual
+                );
+            }
+        }
+        validate_archive_entries(&temporary)?;
+        fs::File::open(&temporary)
+            .with_context(|| format!("failed to open downloaded archive {}", temporary.display()))?
+            .sync_all()
+            .with_context(|| {
+                format!("failed to sync downloaded archive {}", temporary.display())
+            })?;
+        publish_downloaded_archive(&temporary, archive_path)?;
+        Ok(actual)
+    })();
+    if result.is_err() {
+        let _ = remove_existing_path(&temporary);
+    }
+    result
+}
+
+fn create_archive_download_path(archive_path: &Path) -> Result<PathBuf> {
+    let parent = archive_path
+        .parent()
+        .with_context(|| format!("archive path '{}' has no parent", archive_path.display()))?;
+    let name = archive_path
+        .file_name()
+        .unwrap_or_else(|| OsStr::new("archive"))
+        .to_string_lossy();
+    for attempt in 0..1_024_u32 {
+        let candidate = parent.join(format!(
+            ".{name}.depos-download-{}-{attempt}",
+            std::process::id()
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create archive download file {}",
+                        candidate.display()
+                    )
+                });
+            }
+        }
+    }
+    bail!(
+        "unable to allocate an archive download file beside '{}'",
+        archive_path.display()
+    )
+}
+
+fn publish_downloaded_archive(temporary: &Path, archive_path: &Path) -> Result<()> {
+    let previous = match fs::symlink_metadata(archive_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+                bail!(
+                    "archive cache path '{}' must not be a directory",
+                    archive_path.display()
+                );
+            }
+            Some(unused_zip_backup_path(archive_path)?)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect archive cache path {}",
+                    archive_path.display()
+                )
+            });
+        }
+    };
+    let parent = archive_path
+        .parent()
+        .with_context(|| format!("archive path '{}' has no parent", archive_path.display()))?;
+    if let Some(previous) = &previous {
+        fs::rename(archive_path, previous).with_context(|| {
+            format!(
+                "failed to preserve prior archive '{}' as '{}'",
+                archive_path.display(),
+                previous.display()
+            )
+        })?;
+        sync_directory(parent)?;
+    }
+    if let Err(install_error) = fs::rename(temporary, archive_path) {
+        if let Some(previous) = &previous {
+            if let Err(rollback_error) = fs::rename(previous, archive_path) {
+                bail!(
+                    "failed to publish archive '{}' to '{}': {}; rollback from '{}' also failed: {}",
+                    temporary.display(),
+                    archive_path.display(),
+                    install_error,
+                    previous.display(),
+                    rollback_error
+                );
+            }
+            sync_directory(parent)?;
+        }
+        return Err(install_error).with_context(|| {
+            format!(
+                "failed to publish archive '{}' to '{}'",
+                temporary.display(),
+                archive_path.display()
+            )
+        });
+    }
+    sync_directory(parent)?;
+    if let Some(previous) = previous {
+        remove_existing_path(&previous)
+            .with_context(|| format!("failed to remove prior archive {}", previous.display()))?;
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 fn prepare_url_source(archive_path: &Path, source_root: &Path, log: &mut String) -> Result<()> {
     let archive_kind = archive_kind(archive_path)?;
-    let zip_entries = match archive_kind {
-        ArchiveKind::Tar => None,
-        ArchiveKind::Zip => Some(validate_zip_archive(archive_path)?),
-    };
+    if archive_kind == ArchiveKind::Zip {
+        let (mut archive, entries) =
+            open_validated_zip_archive(archive_path, DEPENDENCY_ZIP_LIMITS)?;
+        let staging_root = create_zip_staging_root(source_root)?;
+        log.push_str(&format!(
+            "extract url archive {} -> {}\n",
+            archive_path.display(),
+            staging_root.display()
+        ));
+        if let Err(error) = extract_zip_archive(
+            archive_path,
+            &staging_root,
+            &entries,
+            &mut archive,
+            DEPENDENCY_ZIP_LIMITS,
+        ) {
+            let _ = remove_existing_path(&staging_root);
+            return Err(error);
+        }
+        if let Err(error) = publish_zip_source_tree(&staging_root, source_root) {
+            let _ = remove_existing_path(&staging_root);
+            return Err(error);
+        }
+        return Ok(());
+    }
+
     if source_root.exists() {
         fs::remove_dir_all(source_root)
             .with_context(|| format!("failed to remove {}", source_root.display()))?;
@@ -3950,14 +4109,12 @@ fn prepare_url_source(archive_path: &Path, source_root: &Path, log: &mut String)
         archive_path.display(),
         source_root.display()
     ));
-    if let Some(entries) = zip_entries {
-        return extract_zip_archive(archive_path, source_root, &entries);
-    }
     run_command(
         log,
         None,
         "tar",
         [
+            "--no-same-owner",
             "-xf",
             archive_path
                 .to_str()
@@ -3974,6 +4131,29 @@ fn prepare_url_source(archive_path: &Path, source_root: &Path, log: &mut String)
 }
 
 fn download_url_archive(url: &str, archive_path: &Path, log: &mut String) -> Result<()> {
+    download_url_archive_with_limits(url, archive_path, log, DEPENDENCY_DOWNLOAD_LIMITS)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UrlDownloadLimits {
+    bytes: u64,
+    transfer_timeout: std::time::Duration,
+}
+
+fn download_url_archive_with_limits(
+    url: &str,
+    archive_path: &Path,
+    log: &mut String,
+    limits: UrlDownloadLimits,
+) -> Result<()> {
+    if limits.bytes == 0 || limits.transfer_timeout.is_zero() {
+        bail!("URL download limits must be greater than zero");
+    }
+    let archive = archive_path
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 archive path {}", archive_path.display()))?;
+    let max_bytes = limits.bytes.to_string();
+    let max_time = format!("{:.3}", limits.transfer_timeout.as_secs_f64());
     run_command(
         log,
         None,
@@ -3983,14 +4163,39 @@ fn download_url_archive(url: &str, archive_path: &Path, log: &mut String) -> Res
             "--location",
             "--silent",
             "--show-error",
+            "--max-time",
+            &max_time,
+            "--max-filesize",
+            &max_bytes,
             "--output",
-            archive_path
-                .to_str()
-                .ok_or_else(|| anyhow!("non-utf8 archive path {}", archive_path.display()))?,
+            archive,
             url,
         ],
         None,
     )
+    .with_context(|| {
+        format!(
+            "URL download failed within its {} byte and {:.3} second transfer limits",
+            limits.bytes,
+            limits.transfer_timeout.as_secs_f64()
+        )
+    })?;
+    let downloaded_bytes = fs::metadata(archive_path)
+        .with_context(|| {
+            format!(
+                "failed to inspect downloaded archive {}",
+                archive_path.display()
+            )
+        })?
+        .len();
+    if downloaded_bytes > limits.bytes {
+        bail!(
+            "downloaded archive '{}' exceeds the {} byte transfer limit",
+            archive_path.display(),
+            limits.bytes
+        );
+    }
+    Ok(())
 }
 
 fn file_url_path(url: &str) -> Option<PathBuf> {
@@ -4086,12 +4291,23 @@ enum ZipEntryKind {
     File,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ZipExtractionLimits {
+    archive_bytes: u64,
+    entries: usize,
+    member_bytes: u64,
+    total_bytes: u64,
+    compression_ratio: u64,
+    path_bytes: usize,
+}
+
 #[derive(Clone, Debug)]
 struct ValidatedZipEntry {
     index: usize,
     path: PathBuf,
     kind: ZipEntryKind,
     unix_mode: Option<u32>,
+    declared_size: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -4102,11 +4318,73 @@ struct ZipPathNode {
 }
 
 fn validate_zip_archive(archive_path: &Path) -> Result<Vec<ValidatedZipEntry>> {
+    validate_zip_archive_with_limits(archive_path, DEPENDENCY_ZIP_LIMITS)
+}
+
+fn validate_zip_archive_with_limits(
+    archive_path: &Path,
+    limits: ZipExtractionLimits,
+) -> Result<Vec<ValidatedZipEntry>> {
+    open_validated_zip_archive(archive_path, limits).map(|(_, entries)| entries)
+}
+
+fn open_validated_zip_archive(
+    archive_path: &Path,
+    limits: ZipExtractionLimits,
+) -> Result<(zip::ZipArchive<fs::File>, Vec<ValidatedZipEntry>)> {
+    validate_zip_limits(limits)?;
+    let path_metadata = fs::symlink_metadata(archive_path)
+        .with_context(|| format!("failed to inspect ZIP archive {}", archive_path.display()))?;
+    if !path_metadata.file_type().is_file() {
+        bail!(
+            "ZIP archive '{}' must be a non-symlink regular file",
+            archive_path.display()
+        );
+    }
+    if path_metadata.len() > limits.archive_bytes {
+        bail!(
+            "ZIP archive '{}' exceeds the {} byte archive limit",
+            archive_path.display(),
+            limits.archive_bytes
+        );
+    }
     let archive_file = fs::File::open(archive_path)
         .with_context(|| format!("failed to open ZIP archive {}", archive_path.display()))?;
+    let opened_metadata = archive_file.metadata().with_context(|| {
+        format!(
+            "failed to inspect open ZIP archive {}",
+            archive_path.display()
+        )
+    })?;
+    if !opened_metadata.is_file() || opened_metadata.len() != path_metadata.len() {
+        bail!(
+            "ZIP archive '{}' changed while it was opened",
+            archive_path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened_metadata.dev() != path_metadata.dev()
+            || opened_metadata.ino() != path_metadata.ino()
+        {
+            bail!(
+                "ZIP archive '{}' changed while it was opened",
+                archive_path.display()
+            );
+        }
+    }
     let mut archive = zip::ZipArchive::new(archive_file)
         .with_context(|| format!("failed to read ZIP archive {}", archive_path.display()))?;
+    if archive.len() > limits.entries {
+        bail!(
+            "ZIP archive '{}' contains more than {} entries",
+            archive_path.display(),
+            limits.entries
+        );
+    }
     let mut entries = Vec::with_capacity(archive.len());
+    let mut declared_total = 0_u64;
 
     for index in 0..archive.len() {
         let entry = archive.by_index_raw(index).with_context(|| {
@@ -4118,12 +4396,43 @@ fn validate_zip_archive(archive_path: &Path) -> Result<Vec<ValidatedZipEntry>> {
         let name = entry.name();
         let context = format!("ZIP archive '{}' entry '{}'", archive_path.display(), name);
         let kind = validate_zip_entry_kind(&entry, &context)?;
-        let path = zip_entry_path(name, &context)?;
+        let path = zip_entry_path(name, &context, limits.path_bytes)?;
+        if kind == ZipEntryKind::File {
+            if entry.size() > limits.member_bytes {
+                bail!(
+                    "{context} expands beyond the {} byte member limit",
+                    limits.member_bytes
+                );
+            }
+            declared_total = declared_total
+                .checked_add(entry.size())
+                .with_context(|| format!("{context} overflows the declared ZIP size total"))?;
+            if declared_total > limits.total_bytes {
+                bail!(
+                    "ZIP archive '{}' expands beyond the {} byte total limit",
+                    archive_path.display(),
+                    limits.total_bytes
+                );
+            }
+            if entry.size() > 0
+                && (entry.compressed_size() == 0
+                    || entry.size()
+                        > entry
+                            .compressed_size()
+                            .saturating_mul(limits.compression_ratio))
+            {
+                bail!(
+                    "{context} exceeds the {}:1 compression-ratio limit",
+                    limits.compression_ratio
+                );
+            }
+        }
         entries.push(ValidatedZipEntry {
             index,
             path,
             kind,
             unix_mode: entry.unix_mode(),
+            declared_size: entry.size(),
         });
     }
 
@@ -4145,14 +4454,28 @@ fn validate_zip_archive(archive_path: &Path) -> Result<Vec<ValidatedZipEntry>> {
         register_zip_path(&mut paths, &entry.path, entry.kind, &context)?;
         validated.push(entry);
     }
-    Ok(validated)
+    Ok((archive, validated))
+}
+
+fn validate_zip_limits(limits: ZipExtractionLimits) -> Result<()> {
+    if limits.archive_bytes == 0
+        || limits.entries == 0
+        || limits.member_bytes == 0
+        || limits.total_bytes == 0
+        || limits.compression_ratio == 0
+        || limits.path_bytes == 0
+    {
+        bail!("ZIP extraction limits must all be positive");
+    }
+    Ok(())
 }
 
 fn zip_common_root(entries: &[ValidatedZipEntry]) -> bool {
     let Some(root) = entries
         .first()
         .and_then(|entry| entry.path.components().next())
-        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .and_then(|component| component.as_os_str().to_str())
+        .map(normalized_zip_text)
     else {
         return false;
     };
@@ -4161,7 +4484,10 @@ fn zip_common_root(entries: &[ValidatedZipEntry]) -> bool {
         .any(|entry| entry.path.components().count() > 1)
         && entries.iter().all(|entry| {
             entry.path.components().next().is_some_and(|component| {
-                component.as_os_str().to_string_lossy().to_ascii_lowercase() == root
+                component
+                    .as_os_str()
+                    .to_str()
+                    .is_some_and(|component| normalized_zip_text(component) == root)
             }) && (entry.path.components().count() > 1 || entry.kind == ZipEntryKind::Directory)
         })
 }
@@ -4207,9 +4533,15 @@ fn validate_zip_entry_kind(
     Ok(kind)
 }
 
-fn zip_entry_path(name: &str, context: &str) -> Result<PathBuf> {
+fn zip_entry_path(name: &str, context: &str, max_path_bytes: usize) -> Result<PathBuf> {
     if name.is_empty() || name.contains('\0') {
         bail!("{context} has an empty or NUL-containing path");
+    }
+    if name.len() > max_path_bytes {
+        bail!("{context} exceeds the {max_path_bytes} byte path limit");
+    }
+    if name.chars().any(char::is_control) {
+        bail!("{context} contains a control character");
     }
     if name.starts_with('/') {
         bail!("{context} must be relative");
@@ -4261,9 +4593,20 @@ fn windows_reserved_path_component(component: &str) -> bool {
 
 fn zip_path_key(path: &Path) -> String {
     path.components()
-        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .map(|component| {
+            normalized_zip_text(
+                component
+                    .as_os_str()
+                    .to_str()
+                    .expect("validated ZIP paths are UTF-8"),
+            )
+        })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn normalized_zip_text(value: &str) -> String {
+    value.nfc().flat_map(char::to_lowercase).nfc().collect()
 }
 
 fn register_zip_path(
@@ -4344,26 +4687,25 @@ fn extract_zip_archive(
     archive_path: &Path,
     source_root: &Path,
     entries: &[ValidatedZipEntry],
+    archive: &mut zip::ZipArchive<fs::File>,
+    limits: ZipExtractionLimits,
 ) -> Result<()> {
     let canonical_root = canonical_path(source_root)?;
-    let archive_file = fs::File::open(archive_path)
-        .with_context(|| format!("failed to open ZIP archive {}", archive_path.display()))?;
-    let mut archive = zip::ZipArchive::new(archive_file)
-        .with_context(|| format!("failed to read ZIP archive {}", archive_path.display()))?;
+    let mut total_copied = 0_u64;
 
     for planned in entries {
         let destination = source_root.join(&planned.path);
         match planned.kind {
-            ZipEntryKind::Directory => fs::create_dir_all(&destination).with_context(|| {
-                format!("failed to create ZIP directory {}", destination.display())
-            })?,
+            ZipEntryKind::Directory => {
+                ensure_zip_directory(source_root, &planned.path)?;
+            }
             ZipEntryKind::File => {
-                let parent = destination
+                let relative_parent = planned
+                    .path
                     .parent()
                     .expect("validated ZIP path has a parent");
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("failed to create ZIP directory {}", parent.display())
-                })?;
+                ensure_zip_directory(source_root, relative_parent)?;
+                let parent = destination.parent().expect("ZIP output has a parent");
                 let canonical_parent = canonical_path(parent)?;
                 if !canonical_parent.starts_with(&canonical_root) {
                     bail!(
@@ -4387,9 +4729,36 @@ fn extract_zip_archive(
                     .with_context(|| {
                         format!("failed to create ZIP output {}", destination.display())
                     })?;
-                std::io::copy(&mut entry, &mut output).with_context(|| {
-                    format!("failed to extract ZIP output {}", destination.display())
+                let maximum_copy = planned
+                    .declared_size
+                    .min(limits.member_bytes)
+                    .saturating_add(1);
+                let copied = std::io::copy(&mut entry.by_ref().take(maximum_copy), &mut output)
+                    .with_context(|| {
+                        format!("failed to extract ZIP output {}", destination.display())
+                    })?;
+                total_copied = total_copied.checked_add(copied).with_context(|| {
+                    format!(
+                        "ZIP archive '{}' overflows the extracted byte total",
+                        archive_path.display()
+                    )
                 })?;
+                if copied != planned.declared_size {
+                    bail!(
+                        "ZIP archive '{}' entry '{}' extracted {} bytes but declared {}",
+                        archive_path.display(),
+                        planned.path.display(),
+                        copied,
+                        planned.declared_size
+                    );
+                }
+                if total_copied > limits.total_bytes {
+                    bail!(
+                        "ZIP archive '{}' extracted beyond the {} byte total limit",
+                        archive_path.display(),
+                        limits.total_bytes
+                    );
+                }
                 #[cfg(unix)]
                 if let Some(mode) = planned.unix_mode {
                     use std::os::unix::fs::PermissionsExt;
@@ -4401,6 +4770,9 @@ fn extract_zip_archive(
                             )
                         })?;
                 }
+                output.sync_all().with_context(|| {
+                    format!("failed to sync ZIP output {}", destination.display())
+                })?;
             }
         }
         let canonical_destination = canonical_path(&destination)?;
@@ -4412,6 +4784,224 @@ fn extract_zip_archive(
                 source_root.display()
             );
         }
+    }
+    sync_directory_tree(source_root)?;
+    Ok(())
+}
+
+fn sync_directory_tree(root: &Path) -> Result<()> {
+    for entry in read_dir_sorted(root)? {
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "failed to inspect ZIP staging entry {}",
+                entry.path().display()
+            )
+        })?;
+        if file_type.is_symlink() {
+            bail!(
+                "ZIP staging tree unexpectedly contains symlink '{}'",
+                entry.path().display()
+            );
+        }
+        if file_type.is_dir() {
+            sync_directory_tree(&entry.path())?;
+        }
+    }
+    sync_directory(root)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .with_context(|| format!("failed to open directory {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to sync directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn ensure_zip_directory(source_root: &Path, relative: &Path) -> Result<()> {
+    let mut directory = source_root.to_path_buf();
+    for component in relative.components() {
+        directory.push(component.as_os_str());
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => bail!(
+                "ZIP output parent '{}' is not a real directory",
+                directory.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&directory).with_context(|| {
+                    format!("failed to create ZIP directory {}", directory.display())
+                })?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect ZIP directory {}", directory.display())
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_zip_staging_root(source_root: &Path) -> Result<PathBuf> {
+    let parent = source_root
+        .parent()
+        .with_context(|| format!("ZIP source root '{}' has no parent", source_root.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create ZIP source parent {}", parent.display()))?;
+    let name = source_root
+        .file_name()
+        .unwrap_or_else(|| OsStr::new("source"))
+        .to_string_lossy();
+    for attempt in 0..1_024_u32 {
+        let candidate = parent.join(format!(
+            ".{name}.depos-staging-{}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&candidate) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(error) =
+                        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
+                    {
+                        let _ = fs::remove_dir(&candidate);
+                        return Err(error).with_context(|| {
+                            format!(
+                                "failed to secure ZIP staging directory {}",
+                                candidate.display()
+                            )
+                        });
+                    }
+                }
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create ZIP staging directory {}",
+                        candidate.display()
+                    )
+                });
+            }
+        }
+    }
+    bail!(
+        "unable to allocate a private ZIP staging directory beside '{}'",
+        source_root.display()
+    )
+}
+
+fn unused_zip_backup_path(source_root: &Path) -> Result<PathBuf> {
+    let parent = source_root
+        .parent()
+        .with_context(|| format!("ZIP source root '{}' has no parent", source_root.display()))?;
+    let name = source_root
+        .file_name()
+        .unwrap_or_else(|| OsStr::new("source"))
+        .to_string_lossy();
+    for attempt in 0..1_024_u32 {
+        let candidate = parent.join(format!(
+            ".{name}.depos-previous-{}-{attempt}",
+            std::process::id()
+        ));
+        match fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect ZIP backup path {}", candidate.display())
+                });
+            }
+        }
+    }
+    bail!(
+        "unable to allocate a ZIP backup path beside '{}'",
+        source_root.display()
+    )
+}
+
+fn publish_zip_source_tree(staging_root: &Path, source_root: &Path) -> Result<()> {
+    let parent = source_root
+        .parent()
+        .with_context(|| format!("ZIP source root '{}' has no parent", source_root.display()))?;
+    let previous_metadata = match fs::symlink_metadata(source_root) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect ZIP source root {}",
+                    source_root.display()
+                )
+            });
+        }
+    };
+    if previous_metadata
+        .as_ref()
+        .is_some_and(|metadata| !metadata.file_type().is_dir() || metadata.file_type().is_symlink())
+    {
+        bail!(
+            "ZIP source root '{}' must be a real directory",
+            source_root.display()
+        );
+    }
+
+    let backup = previous_metadata
+        .is_some()
+        .then(|| unused_zip_backup_path(source_root))
+        .transpose()?;
+    if let Some(backup) = &backup {
+        fs::rename(source_root, backup).with_context(|| {
+            format!(
+                "failed to preserve prior ZIP source tree '{}' as '{}'",
+                source_root.display(),
+                backup.display()
+            )
+        })?;
+        sync_directory(parent)?;
+    }
+
+    if let Err(install_error) = fs::rename(staging_root, source_root) {
+        if let Some(backup) = &backup {
+            if let Err(rollback_error) = fs::rename(backup, source_root) {
+                bail!(
+                    "failed to publish ZIP source tree '{}' to '{}': {}; rollback from '{}' also failed: {}",
+                    staging_root.display(),
+                    source_root.display(),
+                    install_error,
+                    backup.display(),
+                    rollback_error
+                );
+            }
+            sync_directory(parent)?;
+        }
+        return Err(install_error).with_context(|| {
+            format!(
+                "failed to publish ZIP source tree '{}' to '{}'",
+                staging_root.display(),
+                source_root.display()
+            )
+        });
+    }
+    sync_directory(parent)?;
+
+    if let Some(backup) = backup {
+        remove_existing_path(&backup).with_context(|| {
+            format!(
+                "failed to remove prior ZIP source tree {}",
+                backup.display()
+            )
+        })?;
+        sync_directory(parent)?;
     }
     Ok(())
 }
@@ -5115,8 +5705,20 @@ fn remove_existing_path(path: &Path) -> Result<()> {
 }
 
 fn hash_file_sha256(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open {} for hashing", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to hash {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn run_command<I, S>(
@@ -10218,6 +10820,138 @@ mod target_platform_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+mod tar_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+    use tar::{Builder, EntryType, Header};
+
+    #[test]
+    fn extracted_sources_are_owned_by_the_materializing_user() {
+        let temp = tempfile::tempdir().expect("create TAR fixture root");
+        let archive_path = temp.path().join("libcap.tar");
+        let mut archive =
+            Builder::new(fs::File::create(&archive_path).expect("create TAR fixture"));
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Directory);
+        header.set_mode(0o775);
+        header.set_uid(1_000);
+        header.set_gid(1_000);
+        header.set_size(0);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "libcap-2.76/libcap/", std::io::empty())
+            .expect("append publisher-owned directory");
+        archive.finish().expect("finish TAR fixture");
+
+        let source_root = temp.path().join("source");
+        prepare_url_source(&archive_path, &source_root, &mut String::new())
+            .expect("extract TAR fixture");
+
+        assert_eq!(
+            fs::metadata(source_root.join("libcap"))
+                .expect("inspect extracted directory")
+                .uid(),
+            fs::metadata(&source_root)
+                .expect("inspect extraction root")
+                .uid()
+        );
+    }
+}
+
+#[cfg(test)]
+mod url_download_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    fn read_request(stream: &mut std::net::TcpStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set request read timeout");
+        let mut request = [0_u8; 1_024];
+        let _ = stream.read(&mut request);
+    }
+
+    #[test]
+    fn aborts_stalled_url_download_at_transfer_deadline() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind stalled HTTP fixture");
+        let address = listener.local_addr().expect("read stalled fixture address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept stalled request");
+            read_request(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\n")
+                .expect("write stalled response headers");
+            stream.flush().expect("flush stalled response headers");
+            thread::sleep(Duration::from_millis(750));
+        });
+        let temp = tempfile::tempdir().expect("create stalled download root");
+        let archive = temp.path().join("stalled.tar");
+        let started = Instant::now();
+        let error = download_url_archive_with_limits(
+            &format!("http://{address}/archive"),
+            &archive,
+            &mut String::new(),
+            UrlDownloadLimits {
+                bytes: 1_024,
+                transfer_timeout: Duration::from_millis(100),
+            },
+        )
+        .expect_err("stalled download should fail");
+        let elapsed = started.elapsed();
+        server.join().expect("join stalled fixture");
+
+        assert!(elapsed < Duration::from_millis(600), "{elapsed:?}");
+        assert!(format!("{error:#}").contains("transfer limit"));
+    }
+
+    #[test]
+    fn aborts_streamed_url_response_at_byte_limit() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind oversized HTTP fixture");
+        let address = listener
+            .local_addr()
+            .expect("read oversized fixture address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept oversized request");
+            read_request(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .expect("write oversized response headers");
+            let payload = [b'x'; 256];
+            for _ in 0..64 {
+                if stream.write_all(&payload).is_err() {
+                    break;
+                }
+                let _ = stream.flush();
+            }
+        });
+        let temp = tempfile::tempdir().expect("create oversized download root");
+        let archive = temp.path().join("oversized.tar");
+        let error = download_url_archive_with_limits(
+            &format!("http://{address}/archive"),
+            &archive,
+            &mut String::new(),
+            UrlDownloadLimits {
+                bytes: 1_024,
+                transfer_timeout: Duration::from_secs(2),
+            },
+        )
+        .expect_err("oversized streamed response should fail");
+        server.join().expect("join oversized fixture");
+
+        assert!(format!("{error:#}").contains("transfer limit"));
+        assert!(
+            fs::metadata(&archive)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+                <= 1_024
+        );
+    }
+}
+
 #[cfg(test)]
 mod zip_tests {
     use super::*;
@@ -10232,10 +10966,18 @@ mod zip_tests {
     }
 
     fn write_zip(path: &Path, entries: &[TestEntry<'_>]) {
+        write_zip_with_compression(path, entries, CompressionMethod::Deflated);
+    }
+
+    fn write_zip_with_compression(
+        path: &Path,
+        entries: &[TestEntry<'_>],
+        compression: CompressionMethod,
+    ) {
         let file = fs::File::create(path).expect("create ZIP fixture");
         let mut archive = ZipWriter::new(file);
         let options = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
+            .compression_method(compression)
             .unix_permissions(0o755);
         for entry in entries {
             match entry {
@@ -10268,6 +11010,8 @@ mod zip_tests {
         let temp = tempfile::tempdir().expect("create temp directory");
         let archive = temp.path().join("db.zip");
         let source = temp.path().join("source");
+        fs::create_dir(&source).expect("create previous source root");
+        fs::write(source.join("previous.h"), b"previous").expect("write previous source");
         write_zip(
             &archive,
             &[
@@ -10290,6 +11034,7 @@ mod zip_tests {
             "/* db */\n"
         );
         assert!(!source.join("db-18.1.40").exists());
+        assert!(!source.join("previous.h").exists());
     }
 
     #[test]
@@ -10345,6 +11090,10 @@ mod zip_tests {
                 "alternate-stream",
             ),
             (
+                vec![TestEntry::File("root/nul\0name", b"")],
+                "NUL-containing",
+            ),
+            (
                 vec![TestEntry::File("root/CON.txt", b"")],
                 "reserved Windows device",
             ),
@@ -10366,6 +11115,13 @@ mod zip_tests {
                 vec![
                     TestEntry::File("root/include/db.h", b"child"),
                     TestEntry::File("root/include", b"file"),
+                ],
+                "collides",
+            ),
+            (
+                vec![
+                    TestEntry::File("root/caf\u{e9}.h", b"one"),
+                    TestEntry::File("root/cafe\u{301}.h", b"two"),
                 ],
                 "collides",
             ),
@@ -10394,6 +11150,214 @@ mod zip_tests {
         fs::write(&archive, bytes).expect("patch ZIP special entry mode");
         let error = validate_zip_archive(&archive).expect_err("special ZIP entry should fail");
         assert!(format!("{error:#}").contains("unsupported special file type"));
+    }
+
+    #[test]
+    fn rejects_zip_bomb_limits_before_extraction() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("bomb.zip");
+        let first_payload = vec![b'0'; 4_096];
+        let second_payload = vec![b'1'; 4_096];
+        write_zip(
+            &archive,
+            &[
+                TestEntry::File("root/one.h", &first_payload),
+                TestEntry::File("root/two.h", &second_payload),
+            ],
+        );
+
+        for (limits, expected) in [
+            (
+                ZipExtractionLimits {
+                    entries: 1,
+                    ..DEPENDENCY_ZIP_LIMITS
+                },
+                "more than 1 entries",
+            ),
+            (
+                ZipExtractionLimits {
+                    member_bytes: 4_095,
+                    ..DEPENDENCY_ZIP_LIMITS
+                },
+                "4095 byte member limit",
+            ),
+            (
+                ZipExtractionLimits {
+                    total_bytes: 8_191,
+                    ..DEPENDENCY_ZIP_LIMITS
+                },
+                "8191 byte total limit",
+            ),
+            (
+                ZipExtractionLimits {
+                    compression_ratio: 1,
+                    ..DEPENDENCY_ZIP_LIMITS
+                },
+                "1:1 compression-ratio limit",
+            ),
+            (
+                ZipExtractionLimits {
+                    archive_bytes: fs::metadata(&archive).unwrap().len() - 1,
+                    ..DEPENDENCY_ZIP_LIMITS
+                },
+                "archive limit",
+            ),
+            (
+                ZipExtractionLimits {
+                    path_bytes: 4,
+                    ..DEPENDENCY_ZIP_LIMITS
+                },
+                "4 byte path limit",
+            ),
+        ] {
+            let error = validate_zip_archive_with_limits(&archive, limits)
+                .expect_err("bounded ZIP should fail validation");
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains(expected), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn extraction_failure_preserves_previous_source_tree() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("corrupt.zip");
+        let source = temp.path().join("source");
+        fs::create_dir(&source).expect("create previous source root");
+        fs::write(source.join("previous.h"), b"previous\n").expect("write previous source");
+        let payload = b"replacement-payload-with-unique-bytes";
+        write_zip_with_compression(
+            &archive,
+            &[TestEntry::File("root/replacement.h", payload)],
+            CompressionMethod::Stored,
+        );
+        let mut bytes = fs::read(&archive).expect("read ZIP fixture");
+        let payload_offset = bytes
+            .windows(payload.len())
+            .position(|window| window == payload)
+            .expect("stored ZIP payload");
+        bytes[payload_offset] ^= 0xff;
+        fs::write(&archive, bytes).expect("corrupt ZIP payload");
+
+        let error = prepare_url_source(&archive, &source, &mut String::new())
+            .expect_err("corrupt ZIP extraction should fail");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("checksum") || rendered.contains("CRC"),
+            "{rendered}"
+        );
+        assert_eq!(
+            fs::read(source.join("previous.h")).expect("read preserved source"),
+            b"previous\n"
+        );
+        assert!(!source.join("replacement.h").exists());
+        let staging_entries = fs::read_dir(temp.path())
+            .expect("read temp root")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("depos-staging")
+            })
+            .count();
+        assert_eq!(staging_entries, 0);
+    }
+
+    #[test]
+    fn truncated_zip_preserves_previous_source_tree() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("truncated.zip");
+        let source = temp.path().join("source");
+        write_zip(&archive, &[TestEntry::File("root/replacement.h", b"new")]);
+        let mut bytes = fs::read(&archive).expect("read ZIP fixture");
+        bytes.truncate(bytes.len().saturating_sub(16));
+        fs::write(&archive, bytes).expect("truncate ZIP fixture");
+        fs::create_dir(&source).expect("create previous source root");
+        fs::write(source.join("previous.h"), b"previous").expect("write previous source");
+
+        prepare_url_source(&archive, &source, &mut String::new())
+            .expect_err("truncated ZIP extraction should fail");
+        assert_eq!(
+            fs::read(source.join("previous.h")).expect("read preserved source"),
+            b"previous"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checksum_mismatch_preserves_previous_archive_until_validated_replacement() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let downloaded = temp.path().join("downloaded.zip");
+        let cached = temp.path().join("cached.zip");
+        write_zip(
+            &downloaded,
+            &[TestEntry::File("root/current.h", b"current")],
+        );
+        write_zip(&cached, &[TestEntry::File("root/previous.h", b"previous")]);
+        let previous = fs::read(&cached).expect("read previous archive");
+        let url = format!("file://{}", downloaded.display());
+
+        let error = resolve_url_source(&url, Some(&"0".repeat(64)), &cached, &mut String::new())
+            .expect_err("checksum mismatch should fail");
+        assert!(format!("{error:#}").contains("sha256 mismatch"));
+        assert_eq!(fs::read(&cached).expect("read preserved archive"), previous);
+
+        let expected = hash_file_sha256(&downloaded).expect("hash replacement archive");
+        assert_eq!(
+            resolve_url_source(&url, Some(&expected), &cached, &mut String::new())
+                .expect("publish validated replacement archive"),
+            expected
+        );
+        assert_eq!(
+            fs::read(&cached).expect("read replacement archive"),
+            fs::read(&downloaded).expect("read source archive")
+        );
+        let leftovers = fs::read_dir(temp.path())
+            .expect("read archive cache directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.contains("depos-download") || name.contains("depos-previous")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_archive_without_replacing_source() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let archive = temp.path().join("real.zip");
+        let archive_link = temp.path().join("linked.zip");
+        let source = temp.path().join("source");
+        write_zip(&archive, &[TestEntry::File("root/replacement.h", b"new")]);
+        symlink(&archive, &archive_link).expect("create archive symlink");
+        fs::create_dir(&source).expect("create source root");
+        fs::write(source.join("previous.h"), b"previous").expect("write previous source");
+
+        let error = prepare_url_source(&archive_link, &source, &mut String::new())
+            .expect_err("symlink ZIP should fail");
+        assert!(format!("{error:#}").contains("non-symlink regular file"));
+        assert_eq!(
+            fs::read(source.join("previous.h")).expect("read preserved source"),
+            b"previous"
+        );
+
+        let outside = temp.path().join("outside");
+        let source_link = temp.path().join("source-link");
+        fs::create_dir(&outside).expect("create symlink target root");
+        fs::write(outside.join("previous.h"), b"outside").expect("write symlink target fixture");
+        symlink(&outside, &source_link).expect("create source-root symlink");
+        let error = prepare_url_source(&archive, &source_link, &mut String::new())
+            .expect_err("symlink source root should fail");
+        assert!(format!("{error:#}").contains("must be a real directory"));
+        assert_eq!(
+            fs::read(outside.join("previous.h")).expect("read untouched symlink target"),
+            b"outside"
+        );
     }
 
     #[test]
