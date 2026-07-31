@@ -3601,7 +3601,7 @@ fn sync_rejects_manifest_with_multiple_target_arches() {
     .expect_err("mixed target architectures should be rejected");
     let error_text = format!("{error:#}");
     assert!(
-        error_text.contains("multiple TARGET_ARCH values"),
+        error_text.contains("span multiple target architecture/platform values"),
         "{error:#}"
     );
 }

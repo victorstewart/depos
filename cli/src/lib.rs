@@ -323,6 +323,45 @@ impl BuildSystem {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum TargetPlatform {
+    Host,
+    Ios,
+    IosSimulator,
+}
+
+impl TargetPlatform {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "host" => Ok(Self::Host),
+            "ios" => Ok(Self::Ios),
+            "ios-simulator" => Ok(Self::IosSimulator),
+            other => bail!(
+                "unsupported target platform '{}'; expected one of: host, ios, ios-simulator",
+                other
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Ios => "ios",
+            Self::IosSimulator => "ios-simulator",
+        }
+    }
+
+    fn validate_host(self) -> Result<()> {
+        if self == Self::Host || cfg!(target_os = "macos") {
+            return Ok(());
+        }
+        bail!(
+            "target platform '{}' requires a native macOS Depos host with the Apple SDK toolchain",
+            self.as_str()
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageSpec {
     pub name: String,
@@ -346,6 +385,8 @@ pub struct PackageSpec {
     pub toolchain_inputs: Vec<String>,
     pub build_arch: String,
     pub target_arch: String,
+    pub supported_target_platforms: BTreeSet<TargetPlatform>,
+    pub target_platform: TargetPlatform,
     build_system: BuildSystem,
     pub origin: PackageOrigin,
 }
@@ -450,6 +491,12 @@ struct ExportManifest {
     paths: Vec<PathBuf>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VariantMetadataPath {
+    path: PathBuf,
+    variant: String,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct SourceProvenance {
     source_ref: Option<String>,
@@ -523,6 +570,7 @@ pub struct InternalMaterializePreparedOptions {
     pub source_root: PathBuf,
     pub store_root: PathBuf,
     pub executable: PathBuf,
+    pub target_platform: TargetPlatform,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -551,7 +599,7 @@ pub struct StatusOptions {
 
 pub fn default_variant() -> String {
     let arch = host_arch();
-    variant_for_arch(&arch)
+    variant_for_target(&arch, TargetPlatform::Host).expect("host architecture is normalized")
 }
 
 fn default_namespace() -> String {
@@ -562,12 +610,12 @@ pub fn host_arch() -> String {
     normalize_arch_name(std::env::consts::ARCH).expect("unsupported host architecture")
 }
 
-fn variant_for_arch(arch: &str) -> String {
-    format!("{arch}-{arch}_v1")
-}
-
-fn variant_for_target_arch(target_arch: &str) -> Result<String> {
-    Ok(variant_for_arch(&normalize_arch_name(target_arch)?))
+fn variant_for_target(target_arch: &str, target_platform: TargetPlatform) -> Result<String> {
+    let arch = normalize_arch_name(target_arch)?;
+    match target_platform {
+        TargetPlatform::Host => Ok(format!("{arch}-{arch}_v1")),
+        _ => Ok(format!("{arch}-{arch}-{}_v1", target_platform.as_str())),
+    }
 }
 
 fn package_relative_store_root(spec: &PackageSpec) -> PathBuf {
@@ -583,6 +631,31 @@ fn package_store_root(depos_root: &Path, variant: &str, spec: &PackageSpec) -> P
         .join(package_relative_store_root(spec))
 }
 
+fn variant_package_store_root(
+    depos_root: &Path,
+    variant: &str,
+    name: &str,
+    namespace: &str,
+    version: &str,
+) -> PathBuf {
+    depos_root
+        .join("store")
+        .join(variant)
+        .join(name)
+        .join(namespace)
+        .join(version)
+}
+
+fn store_roots_match(left: &Path, right: &Path) -> Result<bool> {
+    if left == right {
+        return Ok(true);
+    }
+    if !left.exists() || !right.exists() {
+        return Ok(false);
+    }
+    Ok(canonical_path(left)? == canonical_path(right)?)
+}
+
 fn package_store_root_for_selected(
     depos_root: &Path,
     variant: &str,
@@ -591,30 +664,38 @@ fn package_store_root_for_selected(
     package_store_root(depos_root, variant, &package.spec)
 }
 
-fn variant_for_selected_packages(selected: &[ResolvedPackage]) -> Result<String> {
-    let mut target_arches = BTreeMap::<String, Vec<String>>::new();
+fn variant_for_selected_packages(
+    selected: &[ResolvedPackage],
+    target_platform: TargetPlatform,
+) -> Result<String> {
+    let mut targets = BTreeMap::<(String, TargetPlatform), Vec<String>>::new();
     for package in selected {
-        target_arches
-            .entry(package.spec.target_arch.clone())
+        targets
+            .entry((
+                package.spec.target_arch.clone(),
+                package.spec.target_platform,
+            ))
             .or_default()
             .push(package.spec.package_id());
     }
-    if target_arches.is_empty() {
-        return Ok(default_variant());
+    if targets.is_empty() {
+        return variant_for_target(&host_arch(), target_platform);
     }
-    if target_arches.len() != 1 {
-        let details = target_arches
+    if targets.len() != 1 {
+        let details = targets
             .into_iter()
-            .map(|(arch, packages)| format!("{}: {}", arch, packages.join(", ")))
+            .map(|((arch, platform), packages)| {
+                format!("{arch}/{}: {}", platform.as_str(), packages.join(", "))
+            })
             .collect::<Vec<_>>()
             .join("; ");
         bail!(
-            "selected packages span multiple TARGET_ARCH values, which cannot share one registry/store variant: {}",
+            "selected packages span multiple target architecture/platform values, which cannot share one registry/store variant: {}",
             details
         );
     }
-    let (target_arch, _) = target_arches.into_iter().next().unwrap();
-    variant_for_target_arch(&target_arch)
+    let ((target_arch, target_platform), _) = targets.into_iter().next().unwrap();
+    variant_for_target(&target_arch, target_platform)
 }
 
 fn normalize_arch_name(value: &str) -> Result<String> {
@@ -665,17 +746,35 @@ fn cargo_target_env_fragment(triple: &str) -> String {
 }
 
 pub fn registry_dir_from_manifest(depos_root: &Path, manifest: &Path) -> Result<PathBuf> {
+    registry_dir_from_manifest_for_target_platform(depos_root, manifest, TargetPlatform::Host)
+}
+
+pub fn registry_dir_from_manifest_for_target_platform(
+    depos_root: &Path,
+    manifest: &Path,
+    target_platform: TargetPlatform,
+) -> Result<PathBuf> {
+    target_platform.validate_host()?;
     let depos_root = resolve_depos_root(depos_root)?;
     let requests = parse_manifest(manifest)?;
     rebuild_embedded_depofile_catalog(&depos_root, &requests)?;
     let catalog = load_catalog(&depos_root)?;
-    let selected = resolve_requests(&catalog, &requests)?;
-    let variant = variant_for_selected_packages(&selected)?;
+    let mut selected = resolve_requests(&catalog, &requests)?;
+    apply_target_platform(&mut selected, target_platform)?;
+    let variant = variant_for_selected_packages(&selected, target_platform)?;
     let profile = manifest_profile(manifest)?;
     Ok(depos_root.join("registry").join(variant).join(profile))
 }
 
 pub fn sync_registry(options: &SyncOptions) -> Result<RegistryOutput> {
+    sync_registry_for_target_platform(options, TargetPlatform::Host)
+}
+
+pub fn sync_registry_for_target_platform(
+    options: &SyncOptions,
+    target_platform: TargetPlatform,
+) -> Result<RegistryOutput> {
+    target_platform.validate_host()?;
     let depos_root = resolve_depos_root(&options.depos_root).with_context(|| {
         format!(
             "failed to access depos root {}",
@@ -689,8 +788,9 @@ pub fn sync_registry(options: &SyncOptions) -> Result<RegistryOutput> {
     let requests = parse_manifest(&manifest)?;
     rebuild_embedded_depofile_catalog(&depos_root, &requests)?;
     let catalog = load_catalog(&depos_root)?;
-    let selected = resolve_requests(&catalog, &requests)?;
-    let variant = variant_for_selected_packages(&selected)?;
+    let mut selected = resolve_requests(&catalog, &requests)?;
+    apply_target_platform(&mut selected, target_platform)?;
+    let variant = variant_for_selected_packages(&selected, target_platform)?;
     let variant_root = depos_root.join("store").join(&variant);
     fs::create_dir_all(&variant_root)
         .with_context(|| format!("failed to create {}", variant_root.display()))?;
@@ -737,6 +837,31 @@ pub fn sync_registry(options: &SyncOptions) -> Result<RegistryOutput> {
     })
 }
 
+fn apply_target_platform(
+    selected: &mut [ResolvedPackage],
+    target_platform: TargetPlatform,
+) -> Result<()> {
+    for package in selected {
+        ensure_target_platform_supported(&package.spec, target_platform)?;
+        package.spec.target_platform = target_platform;
+    }
+    Ok(())
+}
+
+fn ensure_target_platform_supported(
+    spec: &PackageSpec,
+    target_platform: TargetPlatform,
+) -> Result<()> {
+    if spec.supported_target_platforms.contains(&target_platform) {
+        return Ok(());
+    }
+    bail!(
+        "package '{}' does not declare target platform '{}' in TARGET_PLATFORMS",
+        spec.package_id(),
+        target_platform.as_str()
+    )
+}
+
 #[cfg(target_os = "linux")]
 pub fn internal_materialize_prepared(options: &InternalMaterializePreparedOptions) -> Result<()> {
     let depos_root = resolve_depos_root(&options.depos_root).with_context(|| {
@@ -747,18 +872,21 @@ pub fn internal_materialize_prepared(options: &InternalMaterializePreparedOption
     })?;
     ensure_package_name(&options.name)?;
     ensure_namespace_name(&options.namespace)?;
+    ensure_version_name(&options.version)?;
     let depofile = resolve_registered_depofile_path(
         &depos_root,
         &options.name,
         &options.namespace,
         &options.version,
     )?;
-    let spec = parse_registered_depofile(
+    let mut spec = parse_registered_depofile(
         &depofile,
         &options.name,
         &options.namespace,
         &options.version,
     )?;
+    spec.target_platform = options.target_platform;
+    ensure_target_platform_supported(&spec, options.target_platform)?;
     let source_root = canonical_path(&options.source_root).with_context(|| {
         format!(
             "failed to access source root {}",
@@ -868,7 +996,7 @@ fn materialize_one_local_package(
     let store_root = package_store_root(depos_root, variant, &package.spec);
     fs::create_dir_all(&store_root)
         .with_context(|| format!("failed to create {}", store_root.display()))?;
-    match materialize_local_package(depos_root, &store_root, &package.spec, executable) {
+    match materialize_local_package(depos_root, variant, &store_root, &package.spec, executable) {
         Ok(message) => {
             write_materialization_status(depos_root, &package.spec, PackageState::Green, message)?;
             Ok(())
@@ -1080,34 +1208,45 @@ fn resolve_dependency_specs(depos_root: &Path, spec: &PackageSpec) -> Result<Vec
                 dependency.namespace
             )
         })?;
-        dependencies.push(
-            select_package(candidates, &dependency.mode).with_context(|| {
-                format!(
-                    "package '{}' could not resolve dependency '{}[{}]'",
-                    spec.package_id(),
-                    dependency.name,
-                    dependency.namespace
-                )
-            })?,
-        );
+        let mut selected = select_package(candidates, &dependency.mode).with_context(|| {
+            format!(
+                "package '{}' could not resolve dependency '{}[{}]'",
+                spec.package_id(),
+                dependency.name,
+                dependency.namespace
+            )
+        })?;
+        selected.target_platform = spec.target_platform;
+        dependencies.push(selected);
     }
     Ok(dependencies)
 }
 
 fn materialize_local_package(
     depos_root: &Path,
+    variant: &str,
     store_root: &Path,
     spec: &PackageSpec,
     executable: &Path,
 ) -> Result<String> {
     let mut log = String::new();
     log.push_str(&format!("materializing {}\n", spec.package_id()));
-    let previous_exports =
-        read_export_manifest(depos_root, &spec.name, &spec.namespace, &spec.version)?;
-    let previous_state =
-        read_materialization_state(depos_root, &spec.name, &spec.namespace, &spec.version)?;
+    let previous_exports = read_export_manifest(
+        depos_root,
+        &spec.name,
+        &spec.namespace,
+        &spec.version,
+        variant,
+    )?;
+    let previous_state = read_materialization_state(
+        depos_root,
+        &spec.name,
+        &spec.namespace,
+        &spec.version,
+        variant,
+    )?;
     let depofile_hash = registered_depofile_hash(depos_root, spec)?;
-    let dependency_keys = dependency_materialization_keys(depos_root, spec)?;
+    let dependency_keys = dependency_materialization_keys(depos_root, spec, variant)?;
     let resolved_source = resolve_package_source(depos_root, spec, &mut log)?;
     let build_key = materialization_build_key(
         &depofile_hash,
@@ -1124,7 +1263,14 @@ fn materialize_local_package(
     )? {
         log.push_str("materialization already up to date\n");
         write_source_provenance(depos_root, spec, &resolved_source.provenance)?;
-        write_materialization_state(depos_root, spec, store_root, &depofile_hash, &build_key)?;
+        write_materialization_state(
+            depos_root,
+            spec,
+            variant,
+            store_root,
+            &depofile_hash,
+            &build_key,
+        )?;
         write_materialization_log(depos_root, spec, &log)?;
         return Ok(format!(
             "materialization already up to date under {}",
@@ -1169,8 +1315,15 @@ fn materialize_local_package(
         &exported_paths,
         &mut log,
     )?;
-    write_export_manifest(depos_root, spec, store_root, &exported_paths)?;
-    write_materialization_state(depos_root, spec, store_root, &depofile_hash, &build_key)?;
+    write_export_manifest(depos_root, spec, variant, store_root, &exported_paths)?;
+    write_materialization_state(
+        depos_root,
+        spec,
+        variant,
+        store_root,
+        &depofile_hash,
+        &build_key,
+    )?;
 
     if !package_exports_present(spec, store_root)? {
         let message = format!(
@@ -1520,7 +1673,7 @@ fn execute_linux_namespaced_command_pipeline(
 ) -> Result<Vec<PathBuf>> {
     validate_supported_command_pipeline(spec)?;
     let host = host_arch();
-    let variant = variant_for_target_arch(&spec.target_arch)?;
+    let variant = variant_for_target(&spec.target_arch, spec.target_platform)?;
     let variant_root = depos_root.join("store").join(&variant);
     let dependency_specs = resolve_dependency_specs(depos_root, spec)?;
 
@@ -1648,7 +1801,7 @@ fn execute_linux_host_staged_system_pipeline(
         bail!("host-staged backend is only valid for BUILD_ROOT SYSTEM");
     }
 
-    let variant = variant_for_target_arch(&spec.target_arch)?;
+    let variant = variant_for_target(&spec.target_arch, spec.target_platform)?;
     let variant_root = depos_root.join("store").join(&variant);
     let dependency_specs = resolve_dependency_specs(depos_root, spec)?;
     let runtime_root_prefix = depos_root.join(".run").join("metalor-runtime");
@@ -1767,7 +1920,7 @@ fn execute_command_pipeline(
             log,
         );
     }
-    let variant = variant_for_target_arch(&spec.target_arch)?;
+    let variant = variant_for_target(&spec.target_arch, spec.target_platform)?;
     let variant_root = depos_root.join("store").join(&variant);
     let dependency_specs = resolve_dependency_specs(depos_root, spec)?;
 
@@ -2178,6 +2331,10 @@ fn build_portable_command_variables(
     variables.insert("DEPO_DEPS_DIR".to_string(), display_path(&paths.deps_dir));
     variables.insert("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone());
     variables.insert("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone());
+    variables.insert(
+        "DEPO_TARGET_PLATFORM".to_string(),
+        spec.target_platform.as_str().to_string(),
+    );
     #[cfg(target_os = "linux")]
     {
         variables.insert(
@@ -2240,6 +2397,10 @@ fn build_portable_command_environment(
         ("DEPO_DEPS_DIR".to_string(), display_path(&paths.deps_dir)),
         ("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone()),
         ("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone()),
+        (
+            "DEPO_TARGET_PLATFORM".to_string(),
+            spec.target_platform.as_str().to_string(),
+        ),
     ];
     #[cfg(target_os = "linux")]
     {
@@ -2511,6 +2672,13 @@ fn translate_portable_phase_executable(job_root: &Path, executable: &str) -> Res
 
 #[cfg(target_os = "linux")]
 fn validate_supported_command_pipeline(spec: &PackageSpec) -> Result<()> {
+    if spec.target_platform != TargetPlatform::Host {
+        bail!(
+            "package '{}' target platform '{}' requires a native macOS BUILD_ROOT SYSTEM pipeline",
+            spec.package_id(),
+            spec.target_platform.as_str()
+        );
+    }
     match (&spec.build_root, &spec.toolchain) {
         (BuildRoot::System, ToolchainSource::System) => {
             if !spec.toolchain_inputs.is_empty() {
@@ -2574,6 +2742,14 @@ fn validate_supported_command_pipeline(spec: &PackageSpec) -> Result<()> {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn validate_supported_command_pipeline(spec: &PackageSpec) -> Result<()> {
+    if spec.target_platform != TargetPlatform::Host && !matches!(spec.build_root, BuildRoot::System)
+    {
+        bail!(
+            "package '{}' target platform '{}' requires a native macOS BUILD_ROOT SYSTEM pipeline",
+            spec.package_id(),
+            spec.target_platform.as_str()
+        );
+    }
     if !spec.toolchain_inputs.is_empty() {
         bail!(
             "package '{}' uses TOOLCHAIN_INPUT, but TOOLCHAIN_INPUT is only supported on Linux BUILD_ROOT SCRATCH or BUILD_ROOT OCI paths",
@@ -2666,6 +2842,10 @@ fn build_command_variables(
     variables.insert("DEPO_DEPS_DIR".to_string(), CELL_DEPS_DIR.to_string());
     variables.insert("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone());
     variables.insert("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone());
+    variables.insert(
+        "DEPO_TARGET_PLATFORM".to_string(),
+        spec.target_platform.as_str().to_string(),
+    );
     variables.insert(
         "DEPO_BUILD_TRIPLE".to_string(),
         linux_gnu_target_triple(&spec.build_arch).to_string(),
@@ -2920,6 +3100,10 @@ fn build_command_environment(
         ("DEPO_DEPS_DIR".to_string(), CELL_DEPS_DIR.to_string()),
         ("DEPO_BUILD_ARCH".to_string(), spec.build_arch.clone()),
         ("DEPO_TARGET_ARCH".to_string(), spec.target_arch.clone()),
+        (
+            "DEPO_TARGET_PLATFORM".to_string(),
+            spec.target_platform.as_str().to_string(),
+        ),
         (
             "DEPO_BUILD_TRIPLE".to_string(),
             linux_gnu_target_triple(&spec.build_arch).to_string(),
@@ -5049,6 +5233,7 @@ fn registered_depofile_hash(depos_root: &Path, spec: &PackageSpec) -> Result<Str
 fn dependency_materialization_keys(
     depos_root: &Path,
     spec: &PackageSpec,
+    variant: &str,
 ) -> Result<Vec<(String, String)>> {
     let mut keys = resolve_dependency_specs(depos_root, spec)?
         .into_iter()
@@ -5060,6 +5245,7 @@ fn dependency_materialization_keys(
                     &dependency.name,
                     &dependency.namespace,
                     &dependency.version,
+                    variant,
                 )?
                 .with_context(|| {
                     format!(
@@ -5149,11 +5335,21 @@ fn write_materialization_status(
         source_ref: provenance.source_ref,
         source_commit: provenance.source_commit,
     };
-    write_status_file(depos_root, &status)
+    write_status_file(
+        depos_root,
+        &status,
+        &variant_for_target(&spec.target_arch, spec.target_platform)?,
+    )
 }
 
 fn write_materialization_log(depos_root: &Path, spec: &PackageSpec, log: &str) -> Result<()> {
-    let path = log_file_path(depos_root, &spec.name, &spec.namespace, &spec.version);
+    let path = log_file_path(
+        depos_root,
+        &spec.name,
+        &spec.namespace,
+        &spec.version,
+        &variant_for_target(&spec.target_arch, spec.target_platform)?,
+    );
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("invalid log path {}", path.display()))?;
@@ -5193,10 +5389,17 @@ fn reconcile_export_manifest(
 fn write_export_manifest(
     depos_root: &Path,
     spec: &PackageSpec,
+    variant: &str,
     store_root: &Path,
     paths: &[PathBuf],
 ) -> Result<()> {
-    let path = export_manifest_path(depos_root, &spec.name, &spec.namespace, &spec.version);
+    let path = export_manifest_path(
+        depos_root,
+        &spec.name,
+        &spec.namespace,
+        &spec.version,
+        variant,
+    );
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("invalid export manifest path {}", path.display()))?;
@@ -5218,11 +5421,23 @@ fn read_export_manifest(
     name: &str,
     namespace: &str,
     version: &str,
+    variant: &str,
 ) -> Result<Option<ExportManifest>> {
-    let path = export_manifest_path(depos_root, name, namespace, version);
+    let path = export_manifest_path(depos_root, name, namespace, version, variant);
     if !path.exists() {
         return Ok(None);
     }
+    let manifest = read_export_manifest_path(&path)?;
+    if !store_roots_match(
+        &manifest.store_root,
+        &variant_package_store_root(depos_root, variant, name, namespace, version),
+    )? {
+        return Ok(None);
+    }
+    Ok(Some(manifest))
+}
+
+fn read_export_manifest_path(path: &Path) -> Result<ExportManifest> {
     let source =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut store_root = None;
@@ -5233,11 +5448,21 @@ fn read_export_manifest(
             continue;
         }
         if let Some(value) = line.strip_prefix("STORE_ROOT ") {
-            store_root = Some(PathBuf::from(value));
+            let value = PathBuf::from(value);
+            if !value.is_absolute() {
+                bail!(
+                    "STORE_ROOT in {} must be absolute, got '{}'",
+                    path.display(),
+                    value.display()
+                );
+            }
+            store_root = Some(value);
             continue;
         }
         if let Some(value) = line.strip_prefix("PATH ") {
-            paths.push(PathBuf::from(value));
+            let value = PathBuf::from(value);
+            ensure_export_manifest_path(&value, path)?;
+            paths.push(value);
             continue;
         }
         bail!(
@@ -5246,11 +5471,52 @@ fn read_export_manifest(
             raw_line
         );
     }
-    Ok(Some(ExportManifest {
+    Ok(ExportManifest {
         store_root: store_root
             .with_context(|| format!("missing STORE_ROOT in {}", path.display()))?,
         paths: dedup_paths(paths),
-    }))
+    })
+}
+
+fn variant_metadata_paths_for_package(
+    depos_root: &Path,
+    category: &str,
+    extension: &str,
+    name: &str,
+    namespace: &str,
+    version: &str,
+) -> Result<Vec<VariantMetadataPath>> {
+    let root = depos_root
+        .join(".run")
+        .join(category)
+        .join(name)
+        .join(namespace);
+    let mut paths = Vec::new();
+    let legacy = root.join(format!("{version}.{extension}"));
+    if legacy.is_file() {
+        paths.push(VariantMetadataPath {
+            path: legacy,
+            variant: default_variant(),
+        });
+    }
+    let variants = root.join(version);
+    if variants.is_dir() {
+        for entry in read_dir_sorted(&variants)? {
+            let path = entry.path();
+            if entry.file_type()?.is_file()
+                && path.extension().and_then(OsStr::to_str) == Some(extension)
+            {
+                let variant = path
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .with_context(|| format!("invalid variant metadata name {}", path.display()))?
+                    .to_string();
+                ensure_safe_path_component(&variant, "variant")?;
+                paths.push(VariantMetadataPath { path, variant });
+            }
+        }
+    }
+    Ok(paths)
 }
 
 fn read_export_manifests(
@@ -5272,29 +5538,43 @@ fn read_export_manifests(
             }
             let namespace = namespace_entry.file_name().to_string_lossy().into_owned();
             for version_entry in read_dir_sorted(&namespace_entry.path())? {
-                if !version_entry.file_type()?.is_file() {
-                    continue;
-                }
                 let version_path = version_entry.path();
-                if version_path
-                    .extension()
-                    .and_then(OsStr::to_str)
-                    .map(|value| value == "exports")
-                    != Some(true)
-                {
+                if version_entry.file_type()?.is_file() {
+                    if version_path.extension().and_then(OsStr::to_str) != Some("exports") {
+                        continue;
+                    }
+                    let Some(version) = version_path
+                        .file_stem()
+                        .and_then(OsStr::to_str)
+                        .map(str::to_string)
+                    else {
+                        continue;
+                    };
+                    manifests.push((
+                        name.clone(),
+                        namespace.clone(),
+                        version,
+                        read_export_manifest_path(&version_path)?,
+                    ));
                     continue;
                 }
-                let Some(version) = version_path
-                    .file_stem()
-                    .and_then(OsStr::to_str)
-                    .map(|value| value.to_string())
-                else {
+                if !version_entry.file_type()?.is_dir() {
                     continue;
-                };
-                if let Some(manifest) =
-                    read_export_manifest(depos_root, &name, &namespace, &version)?
-                {
-                    manifests.push((name.clone(), namespace.clone(), version, manifest));
+                }
+                let version = version_entry.file_name().to_string_lossy().into_owned();
+                for variant_entry in read_dir_sorted(&version_path)? {
+                    let variant_path = variant_entry.path();
+                    if !variant_entry.file_type()?.is_file()
+                        || variant_path.extension().and_then(OsStr::to_str) != Some("exports")
+                    {
+                        continue;
+                    }
+                    manifests.push((
+                        name.clone(),
+                        namespace.clone(),
+                        version.clone(),
+                        read_export_manifest_path(&variant_path)?,
+                    ));
                 }
             }
         }
@@ -5366,11 +5646,18 @@ fn read_source_provenance(
 fn write_materialization_state(
     depos_root: &Path,
     spec: &PackageSpec,
+    variant: &str,
     store_root: &Path,
     depofile_hash: &str,
     build_key: &str,
 ) -> Result<()> {
-    let path = materialization_state_path(depos_root, &spec.name, &spec.namespace, &spec.version);
+    let path = materialization_state_path(
+        depos_root,
+        &spec.name,
+        &spec.namespace,
+        &spec.version,
+        variant,
+    );
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("invalid materialization state path {}", path.display()))?;
@@ -5389,8 +5676,9 @@ fn read_materialization_state(
     name: &str,
     namespace: &str,
     version: &str,
+    variant: &str,
 ) -> Result<Option<MaterializationState>> {
-    let path = materialization_state_path(depos_root, name, namespace, version);
+    let path = materialization_state_path(depos_root, name, namespace, version, variant);
     if !path.exists() {
         return Ok(None);
     }
@@ -5418,13 +5706,20 @@ fn read_materialization_state(
             ),
         }
     }
-    Ok(Some(MaterializationState {
+    let state = MaterializationState {
         store_root: store_root
             .with_context(|| format!("missing store_root in {}", path.display()))?,
         depofile_hash: depofile_hash
             .with_context(|| format!("missing depofile_hash in {}", path.display()))?,
         build_key: build_key.with_context(|| format!("missing build_key in {}", path.display()))?,
-    }))
+    };
+    if !store_roots_match(
+        &state.store_root,
+        &variant_package_store_root(depos_root, variant, name, namespace, version),
+    )? {
+        return Ok(None);
+    }
+    Ok(Some(state))
 }
 
 fn remove_exported_paths(
@@ -5435,21 +5730,103 @@ fn remove_exported_paths(
     if relative_paths.is_empty() {
         return Ok(());
     }
+    let store_root = canonical_path(store_root)?;
     for relative_path in relative_paths {
+        ensure_export_manifest_path(relative_path, Path::new("<loaded export manifest>"))?;
         let absolute_path = store_root.join(relative_path);
         if !path_exists_or_symlink(&absolute_path)? {
             continue;
+        }
+        let parent = canonical_path(
+            absolute_path
+                .parent()
+                .ok_or_else(|| anyhow!("invalid export path {}", absolute_path.display()))?,
+        )?;
+        if !parent.starts_with(&store_root) {
+            bail!(
+                "refusing to remove export '{}' through parent outside store root '{}'",
+                absolute_path.display(),
+                store_root.display()
+            );
         }
         log.push_str(&format!(
             "remove stale export {}\n",
             absolute_path.display()
         ));
         remove_existing_path(&absolute_path)?;
-        if let Some(parent) = absolute_path.parent() {
-            prune_empty_ancestors(parent, store_root)?;
-        }
+        prune_empty_ancestors(&parent, &store_root)?;
     }
     Ok(())
+}
+
+fn confined_existing_parent(
+    depos_root: &Path,
+    owner_root: &Path,
+    path: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let depos_root = canonical_path(depos_root)?;
+    if fs::symlink_metadata(owner_root)
+        .with_context(|| format!("failed to inspect {}", owner_root.display()))?
+        .file_type()
+        .is_symlink()
+    {
+        bail!(
+            "refusing to traverse symlinked metadata root '{}'",
+            owner_root.display()
+        );
+    }
+    let owner_root = canonical_path(owner_root)?;
+    if owner_root != depos_root && !owner_root.starts_with(&depos_root) {
+        bail!(
+            "refusing to access metadata root '{}' outside Depos root '{}'",
+            owner_root.display(),
+            depos_root.display()
+        );
+    }
+    let parent = canonical_path(
+        path.parent()
+            .ok_or_else(|| anyhow!("path has no parent: {}", path.display()))?,
+    )?;
+    if parent != owner_root && !parent.starts_with(&owner_root) {
+        bail!(
+            "refusing to access '{}' through parent outside metadata root '{}'",
+            path.display(),
+            owner_root.display()
+        );
+    }
+    Ok((parent, owner_root))
+}
+
+fn remove_confined_path(depos_root: &Path, owner_root: &Path, path: &Path) -> Result<()> {
+    if !path_exists_or_symlink(path)? {
+        return Ok(());
+    }
+    let (parent, owner_root) = confined_existing_parent(depos_root, owner_root, path)?;
+    remove_existing_path(path)?;
+    prune_empty_ancestors(&parent, &owner_root)
+}
+
+fn destructive_store_root(manifest: &Path, expected: &Path) -> Result<PathBuf> {
+    let manifest = canonical_path(manifest).with_context(|| {
+        format!(
+            "failed to verify manifest store root {}",
+            manifest.display()
+        )
+    })?;
+    let expected = canonical_path(expected).with_context(|| {
+        format!(
+            "failed to verify expected store root {}",
+            expected.display()
+        )
+    })?;
+    if manifest != expected {
+        bail!(
+            "export manifest store root '{}' does not match expected root '{}'",
+            manifest.display(),
+            expected.display()
+        );
+    }
+    Ok(expected)
 }
 
 pub fn register_depofile(options: &RegisterOptions) -> Result<PackageStatus> {
@@ -5478,113 +5855,94 @@ pub fn register_depofile(options: &RegisterOptions) -> Result<PackageStatus> {
 
 pub fn unregister_depofile(options: &UnregisterOptions) -> Result<()> {
     let depos_root = resolve_depos_root(&options.depos_root)?;
-    if let Some(manifest) = read_export_manifest(
+    ensure_package_name(&options.name)?;
+    ensure_namespace_name(&options.namespace)?;
+    ensure_version_name(&options.version)?;
+    let export_manifests = variant_metadata_paths_for_package(
         &depos_root,
+        "exports",
+        "exports",
         &options.name,
         &options.namespace,
         &options.version,
-    )? {
-        let mut cleanup_log = String::new();
-        remove_exported_paths(&manifest.store_root, &manifest.paths, &mut cleanup_log)?;
-        let export_manifest = export_manifest_path(
+    )?;
+    let export_root = depos_root.join(".run").join("exports");
+    for export_manifest in &export_manifests {
+        confined_existing_parent(&depos_root, &export_root, &export_manifest.path)?;
+        let manifest = read_export_manifest_path(&export_manifest.path)?;
+        let expected_store_root = variant_package_store_root(
             &depos_root,
+            &export_manifest.variant,
             &options.name,
             &options.namespace,
             &options.version,
         );
-        fs::remove_file(&export_manifest)
-            .with_context(|| format!("failed to remove {}", export_manifest.display()))?;
-        prune_empty_ancestors(
-            export_manifest
-                .parent()
-                .ok_or_else(|| anyhow!("invalid export manifest path"))?,
-            &depos_root.join(".run").join("exports"),
-        )?;
+        let store_root = destructive_store_root(&manifest.store_root, &expected_store_root)?;
+        let mut cleanup_log = String::new();
+        remove_exported_paths(&store_root, &manifest.paths, &mut cleanup_log)?;
+    }
+    for export_manifest in export_manifests {
+        remove_confined_path(&depos_root, &export_root, &export_manifest.path)?;
     }
 
+    let depofile_root = depos_root.join("depofiles").join("local");
     let depofile_dir = depos_root
         .join("depofiles")
         .join("local")
         .join(&options.name)
         .join(&options.namespace)
         .join(&options.version);
-    if depofile_dir.exists() {
-        fs::remove_dir_all(&depofile_dir)
-            .with_context(|| format!("failed to remove {}", depofile_dir.display()))?;
-    }
-    prune_empty_ancestors(
-        depofile_dir
-            .parent()
-            .ok_or_else(|| anyhow!("invalid depofile directory"))?,
-        &depos_root.join("depofiles").join("local"),
-    )?;
+    remove_confined_path(&depos_root, &depofile_root, &depofile_dir)?;
 
-    let status_path = status_file_path(
+    let status_root = depos_root.join(".run").join("status");
+    let status_paths = variant_metadata_paths_for_package(
         &depos_root,
+        "status",
+        "status",
         &options.name,
         &options.namespace,
         &options.version,
-    );
-    if status_path.exists() {
-        fs::remove_file(&status_path)
-            .with_context(|| format!("failed to remove {}", status_path.display()))?;
-    }
-    prune_empty_ancestors(
-        status_path
-            .parent()
-            .ok_or_else(|| anyhow!("invalid status path"))?,
-        &depos_root.join(".run").join("status"),
     )?;
+    for status in status_paths {
+        remove_confined_path(&depos_root, &status_root, &status.path)?;
+    }
 
-    let log_path = log_file_path(
+    let log_root = depos_root.join(".run").join("logs");
+    let log_paths = variant_metadata_paths_for_package(
         &depos_root,
+        "logs",
+        "log",
         &options.name,
         &options.namespace,
         &options.version,
-    );
-    if log_path.exists() {
-        fs::remove_file(&log_path)
-            .with_context(|| format!("failed to remove {}", log_path.display()))?;
-        prune_empty_ancestors(
-            log_path
-                .parent()
-                .ok_or_else(|| anyhow!("invalid log path"))?,
-            &depos_root.join(".run").join("logs"),
-        )?;
+    )?;
+    for log in log_paths {
+        remove_confined_path(&depos_root, &log_root, &log.path)?;
     }
 
+    let provenance_root = depos_root.join(".run").join("provenance");
     let provenance_path = provenance_file_path(
         &depos_root,
         &options.name,
         &options.namespace,
         &options.version,
     );
-    if provenance_path.exists() {
-        fs::remove_file(&provenance_path)
-            .with_context(|| format!("failed to remove {}", provenance_path.display()))?;
-        prune_empty_ancestors(
-            provenance_path
-                .parent()
-                .ok_or_else(|| anyhow!("invalid provenance path"))?,
-            &depos_root.join(".run").join("provenance"),
-        )?;
-    }
+    remove_confined_path(&depos_root, &provenance_root, &provenance_path)?;
 
-    let materialization_state_path = materialization_state_path(
+    let materialization_root = depos_root.join(".run").join("materialization");
+    let materialization_state_paths = variant_metadata_paths_for_package(
         &depos_root,
+        "materialization",
+        "state",
         &options.name,
         &options.namespace,
         &options.version,
-    );
-    if materialization_state_path.exists() {
-        fs::remove_file(&materialization_state_path).with_context(|| {
-            format!("failed to remove {}", materialization_state_path.display())
-        })?;
-        prune_empty_ancestors(
-            materialization_state_path
-                .parent()
-                .ok_or_else(|| anyhow!("invalid materialization state path"))?,
-            &depos_root.join(".run").join("materialization"),
+    )?;
+    for materialization_state in materialization_state_paths {
+        remove_confined_path(
+            &depos_root,
+            &materialization_root,
+            &materialization_state.path,
         )?;
     }
 
@@ -5592,15 +5950,38 @@ pub fn unregister_depofile(options: &UnregisterOptions) -> Result<()> {
 }
 
 pub fn collect_statuses(options: &StatusOptions) -> Result<Vec<PackageStatus>> {
+    collect_statuses_for_target_platform(options, TargetPlatform::Host)
+}
+
+pub fn collect_statuses_for_target_platform(
+    options: &StatusOptions,
+    target_platform: TargetPlatform,
+) -> Result<Vec<PackageStatus>> {
+    target_platform.validate_host()?;
     let depos_root = resolve_depos_root(&options.depos_root)?;
 
     match (&options.name, &options.namespace, &options.version) {
         (Some(name), namespace, Some(version)) => {
             let namespace = namespace.clone().unwrap_or_else(default_namespace);
+            ensure_package_name(name)?;
+            ensure_namespace_name(&namespace)?;
+            ensure_version_name(version)?;
             let status = if options.refresh {
-                refresh_status(&depos_root, name, &namespace, version)?
+                refresh_status_for_target_platform(
+                    &depos_root,
+                    name,
+                    &namespace,
+                    version,
+                    target_platform,
+                )?
             } else {
-                read_or_refresh_status(&depos_root, name, &namespace, version)?
+                read_or_refresh_status_for_target_platform(
+                    &depos_root,
+                    name,
+                    &namespace,
+                    version,
+                    target_platform,
+                )?
             };
             Ok(vec![status])
         }
@@ -5608,9 +5989,21 @@ pub fn collect_statuses(options: &StatusOptions) -> Result<Vec<PackageStatus>> {
             let mut statuses = Vec::new();
             for (name, namespace, version) in registered_packages(&depos_root)? {
                 let status = if options.refresh {
-                    refresh_status(&depos_root, &name, &namespace, &version)?
+                    refresh_status_for_target_platform(
+                        &depos_root,
+                        &name,
+                        &namespace,
+                        &version,
+                        target_platform,
+                    )?
                 } else {
-                    read_or_refresh_status(&depos_root, &name, &namespace, &version)?
+                    read_or_refresh_status_for_target_platform(
+                        &depos_root,
+                        &name,
+                        &namespace,
+                        &version,
+                        target_platform,
+                    )?
                 };
                 statuses.push(status);
             }
@@ -5677,11 +6070,13 @@ pub fn parse_manifest(path: &Path) -> Result<Vec<PackageRequest>> {
                 "VERSION" => {
                     index += 1;
                     let value = tokens.get(index).context("VERSION requires a value")?;
+                    ensure_version_name(value)?;
                     mode = RequestMode::Exact(value.clone());
                 }
                 "MIN_VERSION" => {
                     index += 1;
                     let value = tokens.get(index).context("MIN_VERSION requires a value")?;
+                    ensure_version_name(value)?;
                     mode = RequestMode::Minimum(value.clone());
                 }
                 "SOURCE" => {
@@ -5746,6 +6141,8 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
     let mut toolchain_inputs = Vec::new();
     let mut build_arch = host_arch();
     let mut target_arch = build_arch.clone();
+    let mut supported_target_platforms = BTreeSet::from([TargetPlatform::Host]);
+    let mut target_platforms_declared = false;
     let mut build_system: Option<BuildSystem> = None;
     let mut build_system_line = None;
     let mut git_submodules_recursive = false;
@@ -5804,7 +6201,9 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
                 );
             }
             "VERSION" => {
-                version = Some(expect_single_token(path, line_number, keyword, remainder)?);
+                let value = expect_single_token(path, line_number, keyword, remainder)?;
+                ensure_version_name(&value)?;
+                version = Some(value);
             }
             "SOURCE_SUBDIR" => {
                 source_subdir = Some(PathBuf::from(expect_single_token(
@@ -6343,6 +6742,41 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
                     remainder,
                 )?)?;
             }
+            "TARGET_PLATFORMS" => {
+                if std::mem::replace(&mut target_platforms_declared, true) {
+                    bail!(
+                        "{}:{}: TARGET_PLATFORMS may be declared only once",
+                        path.display(),
+                        line_number
+                    );
+                }
+                let values = tokenize_arguments(remainder)?;
+                if values.is_empty() {
+                    bail!(
+                        "{}:{}: TARGET_PLATFORMS requires at least one platform",
+                        path.display(),
+                        line_number
+                    );
+                }
+                supported_target_platforms.clear();
+                for value in values {
+                    let platform = TargetPlatform::parse(&value).with_context(|| {
+                        format!(
+                            "{}:{}: invalid TARGET_PLATFORMS value",
+                            path.display(),
+                            line_number
+                        )
+                    })?;
+                    if !supported_target_platforms.insert(platform) {
+                        bail!(
+                            "{}:{}: duplicate TARGET_PLATFORMS value '{}'",
+                            path.display(),
+                            line_number,
+                            value
+                        );
+                    }
+                }
+            }
             "DEPENDS" => depends.push(parse_dependency_request(
                 path,
                 line_number,
@@ -6729,6 +7163,8 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
         toolchain_inputs,
         build_arch,
         target_arch,
+        supported_target_platforms,
+        target_platform: TargetPlatform::Host,
         build_system: build_system.unwrap_or(BuildSystem::Manual),
         origin: PackageOrigin::Local,
     };
@@ -6849,6 +7285,7 @@ fn parse_registered_depofile(
 ) -> Result<PackageSpec> {
     ensure_package_name(expected_name)?;
     ensure_namespace_name(expected_namespace)?;
+    ensure_version_name(expected_version)?;
     let mut spec = parse_depofile(path)?;
     if spec.name != expected_name {
         bail!(
@@ -6910,6 +7347,8 @@ fn builtin_catalog() -> Vec<PackageSpec> {
             toolchain_inputs: Vec::new(),
             build_arch: host_arch(),
             target_arch: host_arch(),
+            supported_target_platforms: BTreeSet::from([TargetPlatform::Host]),
+            target_platform: TargetPlatform::Host,
             build_system: BuildSystem::Manual,
             origin: PackageOrigin::Builtin,
         },
@@ -6946,6 +7385,8 @@ fn builtin_catalog() -> Vec<PackageSpec> {
             toolchain_inputs: Vec::new(),
             build_arch: host_arch(),
             target_arch: host_arch(),
+            supported_target_platforms: BTreeSet::from([TargetPlatform::Host]),
+            target_platform: TargetPlatform::Host,
             build_system: BuildSystem::Manual,
             origin: PackageOrigin::Builtin,
         },
@@ -6982,6 +7423,8 @@ fn builtin_catalog() -> Vec<PackageSpec> {
             toolchain_inputs: Vec::new(),
             build_arch: host_arch(),
             target_arch: host_arch(),
+            supported_target_platforms: BTreeSet::from([TargetPlatform::Host]),
+            target_platform: TargetPlatform::Host,
             build_system: BuildSystem::Manual,
             origin: PackageOrigin::Builtin,
         },
@@ -7884,8 +8327,19 @@ fn refresh_status(
     namespace: &str,
     version: &str,
 ) -> Result<PackageStatus> {
+    refresh_status_for_target_platform(depos_root, name, namespace, version, TargetPlatform::Host)
+}
+
+fn refresh_status_for_target_platform(
+    depos_root: &Path,
+    name: &str,
+    namespace: &str,
+    version: &str,
+    target_platform: TargetPlatform,
+) -> Result<PackageStatus> {
     let depofile_path = resolve_registered_depofile_path(depos_root, name, namespace, version)?;
-    let spec = parse_registered_depofile(&depofile_path, name, namespace, version)?;
+    let mut spec = parse_registered_depofile(&depofile_path, name, namespace, version)?;
+    spec.target_platform = target_platform;
     let catalog = load_catalog(depos_root)?;
     let missing_dependencies = spec
         .depends
@@ -7893,7 +8347,7 @@ fn refresh_status(
         .filter_map(|dependency| dependency_missing_reason(&catalog, dependency))
         .collect::<Vec<_>>();
 
-    let variant = variant_for_target_arch(&spec.target_arch)?;
+    let variant = variant_for_target(&spec.target_arch, spec.target_platform)?;
     let store_root = package_store_root(depos_root, &variant, &spec);
     let provenance =
         read_source_provenance(depos_root, &spec.name, &spec.namespace, &spec.version)?;
@@ -7940,7 +8394,7 @@ fn refresh_status(
         source_ref: provenance.source_ref,
         source_commit: provenance.source_commit,
     };
-    write_status_file(depos_root, &status)?;
+    write_status_file(depos_root, &status, &variant)?;
     Ok(status)
 }
 
@@ -7971,22 +8425,32 @@ fn dependency_missing_reason(
     None
 }
 
-fn read_or_refresh_status(
+fn read_or_refresh_status_for_target_platform(
     depos_root: &Path,
     name: &str,
     namespace: &str,
     version: &str,
+    target_platform: TargetPlatform,
 ) -> Result<PackageStatus> {
-    let path = status_file_path(depos_root, name, namespace, version);
+    let depofile = resolve_registered_depofile_path(depos_root, name, namespace, version)?;
+    let spec = parse_registered_depofile(&depofile, name, namespace, version)?;
+    let variant = variant_for_target(&spec.target_arch, target_platform)?;
+    let path = status_file_path(depos_root, name, namespace, version, &variant);
     if path.exists() {
         read_status_file(&path)
     } else {
-        refresh_status(depos_root, name, namespace, version)
+        refresh_status_for_target_platform(depos_root, name, namespace, version, target_platform)
     }
 }
 
-fn write_status_file(depos_root: &Path, status: &PackageStatus) -> Result<()> {
-    let path = status_file_path(depos_root, &status.name, &status.namespace, &status.version);
+fn write_status_file(depos_root: &Path, status: &PackageStatus, variant: &str) -> Result<()> {
+    let path = status_file_path(
+        depos_root,
+        &status.name,
+        &status.namespace,
+        &status.version,
+        variant,
+    );
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("invalid status file path {}", path.display()))?;
@@ -8621,6 +9085,7 @@ fn parse_dependency_request(
                         line_number
                     )
                 })?;
+                ensure_version_name(value)?;
                 mode = RequestMode::Exact(value.clone());
             }
             "MIN_VERSION" => {
@@ -8632,6 +9097,7 @@ fn parse_dependency_request(
                         line_number
                     )
                 })?;
+                ensure_version_name(value)?;
                 mode = RequestMode::Minimum(value.clone());
             }
             "SOURCE" => {
@@ -9049,7 +9515,7 @@ fn default_cmake_cross_configure_args(target_arch: &str) -> Vec<String> {
 }
 
 fn ensure_package_name(name: &str) -> Result<()> {
-    if !valid_identifier(name) {
+    if !valid_identifier(name) || ensure_safe_path_component(name, "package name").is_err() {
         bail!("invalid package name '{}'", name);
     }
     Ok(())
@@ -9064,6 +9530,70 @@ fn ensure_namespace_name(namespace: &str) -> Result<()> {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         bail!("invalid namespace '{}'", namespace);
+    }
+    ensure_safe_path_component(namespace, "namespace")?;
+    Ok(())
+}
+
+fn ensure_version_name(version: &str) -> Result<()> {
+    if !version
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+    {
+        bail!("invalid version '{}'", version);
+    }
+    ensure_safe_path_component(version, "version")?;
+    Ok(())
+}
+
+fn ensure_safe_path_component(value: &str, label: &str) -> Result<()> {
+    if value.is_empty()
+        || value.chars().any(char::is_control)
+        || value.contains(['/', '\\', ':'])
+        || value.ends_with([' ', '.'])
+        || windows_reserved_path_component(value)
+    {
+        bail!("invalid {label} '{}'", value);
+    }
+    let mut components = Path::new(value).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        bail!("invalid {label} '{}'", value);
+    }
+    Ok(())
+}
+
+fn ensure_export_manifest_path(path: &Path, manifest: &Path) -> Result<()> {
+    let value = path.to_str().with_context(|| {
+        format!(
+            "PATH in export manifest {} must be valid UTF-8",
+            manifest.display()
+        )
+    })?;
+    if value.is_empty() || path.is_absolute() {
+        bail!(
+            "PATH '{}' in export manifest {} must be nonempty and relative",
+            path.display(),
+            manifest.display()
+        );
+    }
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            bail!(
+                "PATH '{}' in export manifest {} must contain only normal relative components",
+                path.display(),
+                manifest.display()
+            );
+        };
+        ensure_safe_path_component(
+            component.to_str().with_context(|| {
+                format!(
+                    "PATH '{}' in export manifest {} must be valid UTF-8",
+                    path.display(),
+                    manifest.display()
+                )
+            })?,
+            "export path component",
+        )?;
     }
     Ok(())
 }
@@ -9313,31 +9843,61 @@ fn resolve_registered_depofile_path(
     );
 }
 
-fn status_file_path(depos_root: &Path, name: &str, namespace: &str, version: &str) -> PathBuf {
-    depos_root
+fn status_file_path(
+    depos_root: &Path,
+    name: &str,
+    namespace: &str,
+    version: &str,
+    variant: &str,
+) -> PathBuf {
+    let root = depos_root
         .join(".run")
         .join("status")
         .join(name)
-        .join(namespace)
-        .join(format!("{version}.status"))
+        .join(namespace);
+    if variant == default_variant() {
+        root.join(format!("{version}.status"))
+    } else {
+        root.join(version).join(format!("{variant}.status"))
+    }
 }
 
-fn log_file_path(depos_root: &Path, name: &str, namespace: &str, version: &str) -> PathBuf {
-    depos_root
+fn log_file_path(
+    depos_root: &Path,
+    name: &str,
+    namespace: &str,
+    version: &str,
+    variant: &str,
+) -> PathBuf {
+    let root = depos_root
         .join(".run")
         .join("logs")
         .join(name)
-        .join(namespace)
-        .join(format!("{version}.log"))
+        .join(namespace);
+    if variant == default_variant() {
+        root.join(format!("{version}.log"))
+    } else {
+        root.join(version).join(format!("{variant}.log"))
+    }
 }
 
-fn export_manifest_path(depos_root: &Path, name: &str, namespace: &str, version: &str) -> PathBuf {
-    depos_root
+fn export_manifest_path(
+    depos_root: &Path,
+    name: &str,
+    namespace: &str,
+    version: &str,
+    variant: &str,
+) -> PathBuf {
+    let root = depos_root
         .join(".run")
         .join("exports")
         .join(name)
-        .join(namespace)
-        .join(format!("{version}.exports"))
+        .join(namespace);
+    if variant == default_variant() {
+        root.join(format!("{version}.exports"))
+    } else {
+        root.join(version).join(format!("{variant}.exports"))
+    }
 }
 
 fn provenance_file_path(depos_root: &Path, name: &str, namespace: &str, version: &str) -> PathBuf {
@@ -9354,16 +9914,28 @@ fn materialization_state_path(
     name: &str,
     namespace: &str,
     version: &str,
+    variant: &str,
 ) -> PathBuf {
-    depos_root
+    let root = depos_root
         .join(".run")
         .join("materialization")
         .join(name)
-        .join(namespace)
-        .join(format!("{version}.state"))
+        .join(namespace);
+    if variant == default_variant() {
+        root.join(format!("{version}.state"))
+    } else {
+        root.join(version).join(format!("{variant}.state"))
+    }
 }
 
 fn prune_empty_ancestors(path: &Path, stop_at: &Path) -> Result<()> {
+    if path != stop_at && !path.starts_with(stop_at) {
+        bail!(
+            "refusing to prune '{}' outside '{}'",
+            path.display(),
+            stop_at.display()
+        );
+    }
     let stop_at = stop_at.to_path_buf();
     let mut current = path.to_path_buf();
     while current != stop_at {
@@ -9390,6 +9962,260 @@ fn prune_empty_ancestors(path: &Path, stop_at: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod metadata_safety_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_coordinates_that_are_not_safe_path_components() {
+        for namespace in ["", ".", "..", "a/b", r"a\b", "C:"] {
+            assert!(ensure_namespace_name(namespace).is_err(), "{namespace}");
+        }
+        for version in ["", ".", "..", "a/b", r"a\b", "C:", "1.0.0/../../victim"] {
+            assert!(ensure_version_name(version).is_err(), "{version}");
+        }
+    }
+
+    #[test]
+    fn rejects_unconfined_export_manifest_fields() {
+        let temp = tempfile::tempdir().expect("create manifest fixture root");
+        let manifest = temp.path().join("fixture.exports");
+        for contents in [
+            "STORE_ROOT relative\nPATH include/demo.h\n",
+            "STORE_ROOT /tmp/store\nPATH /tmp/victim\n",
+            "STORE_ROOT /tmp/store\nPATH ../victim\n",
+            "STORE_ROOT /tmp/store\nPATH .\n",
+        ] {
+            fs::write(&manifest, contents).expect("write export manifest fixture");
+            assert!(
+                read_export_manifest_path(&manifest).is_err(),
+                "{contents:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn forged_manifest_root_cannot_delete_external_files() {
+        let temp = tempfile::tempdir().expect("create unregister fixture root");
+        let depos_root = temp.path().join("depos");
+        let expected =
+            variant_package_store_root(&depos_root, &default_variant(), "demo", "release", "1.0.0");
+        let external = temp.path().join("external");
+        fs::create_dir_all(&expected).expect("create expected store root");
+        fs::create_dir_all(&external).expect("create external root");
+        fs::write(external.join("victim"), b"keep").expect("write external sentinel");
+        let manifest =
+            export_manifest_path(&depos_root, "demo", "release", "1.0.0", &default_variant());
+        fs::create_dir_all(manifest.parent().unwrap()).expect("create manifest parent");
+        fs::write(
+            &manifest,
+            format!("STORE_ROOT {}\nPATH victim\n", external.display()),
+        )
+        .expect("write forged manifest");
+
+        assert!(unregister_depofile(&UnregisterOptions {
+            depos_root,
+            name: "demo".to_string(),
+            namespace: "release".to_string(),
+            version: "1.0.0".to_string(),
+        })
+        .is_err());
+        assert_eq!(
+            fs::read(external.join("victim")).expect("read external sentinel"),
+            b"keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_cleanup_rejects_intermediate_symlink_escape_and_accepts_root_alias() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create symlink fixture root");
+        let store = temp.path().join("store");
+        let external = temp.path().join("external");
+        fs::create_dir_all(&store).expect("create store");
+        fs::create_dir_all(&external).expect("create external root");
+        fs::write(external.join("victim"), b"keep").expect("write external sentinel");
+        symlink(&external, store.join("escape")).expect("create escaping store symlink");
+
+        assert!(remove_exported_paths(
+            &store,
+            &[PathBuf::from("escape/victim")],
+            &mut String::new(),
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(external.join("victim")).expect("read external sentinel"),
+            b"keep"
+        );
+
+        let alias = temp.path().join("store-alias");
+        symlink(&store, &alias).expect("create store alias");
+        assert_eq!(
+            destructive_store_root(&alias, &store).expect("accept canonical store alias"),
+            fs::canonicalize(&store).expect("canonical store")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_cleanup_rejects_intermediate_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create metadata cleanup fixture root");
+        let depos_root = temp.path().join("depos");
+        fs::create_dir(&depos_root).expect("create Depos root");
+        for (index, relative_root) in [
+            "depofiles/local",
+            ".run/exports",
+            ".run/status",
+            ".run/logs",
+            ".run/provenance",
+            ".run/materialization",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let owner_root = depos_root.join(relative_root);
+            let external = temp.path().join(format!("external-{index}"));
+            fs::create_dir_all(&owner_root).expect("create metadata owner root");
+            fs::create_dir_all(external.join("release")).expect("create external metadata root");
+            let sentinel = external.join("release/victim");
+            fs::write(&sentinel, b"keep").expect("write external metadata sentinel");
+            symlink(&external, owner_root.join("demo")).expect("create metadata escape symlink");
+
+            assert!(remove_confined_path(
+                &depos_root,
+                &owner_root,
+                &owner_root.join("demo/release/victim"),
+            )
+            .is_err());
+            assert_eq!(
+                fs::read(&sentinel).expect("read external metadata sentinel"),
+                b"keep"
+            );
+        }
+    }
+
+    #[test]
+    fn prune_never_walks_outside_its_stop_root() {
+        let temp = tempfile::tempdir().expect("create prune fixture root");
+        let stop = temp.path().join("inside");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&stop).expect("create stop root");
+        fs::create_dir_all(&outside).expect("create outside root");
+        assert!(prune_empty_ancestors(&outside, &stop).is_err());
+        assert!(outside.exists());
+    }
+}
+
+#[cfg(test)]
+mod target_platform_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_declared_target_platforms() {
+        assert_eq!(TargetPlatform::parse("host").unwrap(), TargetPlatform::Host);
+        assert_eq!(TargetPlatform::parse("ios").unwrap(), TargetPlatform::Ios);
+        assert_eq!(
+            TargetPlatform::parse("ios-simulator").unwrap(),
+            TargetPlatform::IosSimulator
+        );
+        assert!(TargetPlatform::parse("macos").is_err());
+        assert!(TargetPlatform::parse("IOS").is_err());
+    }
+
+    #[test]
+    fn non_host_platforms_require_explicit_recipe_support() {
+        let mut spec = builtin_catalog().remove(0);
+        assert!(ensure_target_platform_supported(&spec, TargetPlatform::Ios).is_err());
+        spec.supported_target_platforms.insert(TargetPlatform::Ios);
+        ensure_target_platform_supported(&spec, TargetPlatform::Ios)
+            .expect("accept explicitly supported iOS recipe");
+    }
+
+    #[test]
+    fn parses_explicit_recipe_platform_support() {
+        let temp = tempfile::tempdir().expect("create platform DepoFile fixture root");
+        let depofile = temp.path().join("fixture.DepoFile");
+        fs::write(
+            &depofile,
+            "NAME demo\nVERSION 1\nTARGET_PLATFORMS host ios ios-simulator\nTARGET demo::demo INTERFACE include\n",
+        )
+        .expect("write platform DepoFile fixture");
+        let spec = parse_depofile(&depofile).expect("parse platform DepoFile fixture");
+        assert_eq!(
+            spec.supported_target_platforms,
+            BTreeSet::from([
+                TargetPlatform::Host,
+                TargetPlatform::Ios,
+                TargetPlatform::IosSimulator,
+            ])
+        );
+    }
+
+    #[test]
+    fn apple_platforms_reject_linux_provider_pipelines() {
+        let mut spec = builtin_catalog().remove(0);
+        spec.supported_target_platforms.insert(TargetPlatform::Ios);
+        spec.target_platform = TargetPlatform::Ios;
+        spec.build_root =
+            BuildRoot::Oci("docker://example.invalid/toolchain@sha256:00".to_string());
+        spec.toolchain = ToolchainSource::Rootfs;
+        let error = validate_supported_command_pipeline(&spec)
+            .expect_err("iOS artifact must not be delegated to a Linux provider");
+        assert!(
+            format!("{error:#}").contains("native macOS BUILD_ROOT SYSTEM"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn target_platform_separates_variants() {
+        assert_eq!(
+            variant_for_target("aarch64", TargetPlatform::Host).unwrap(),
+            "aarch64-aarch64_v1"
+        );
+        assert_eq!(
+            variant_for_target("aarch64", TargetPlatform::Ios).unwrap(),
+            "aarch64-aarch64-ios_v1"
+        );
+        assert_eq!(
+            variant_for_target("aarch64", TargetPlatform::IosSimulator).unwrap(),
+            "aarch64-aarch64-ios-simulator_v1"
+        );
+
+        assert_eq!(
+            variant_for_selected_packages(&[], TargetPlatform::Ios).unwrap(),
+            variant_for_target(&host_arch(), TargetPlatform::Ios).unwrap()
+        );
+    }
+
+    #[test]
+    fn exposes_only_the_selected_platform_to_recipes() {
+        let temp = tempfile::tempdir().expect("create portable command fixture root");
+        let paths = portable_command_paths(temp.path()).expect("create portable command paths");
+        let mut spec = builtin_catalog().remove(0);
+        spec.target_platform = TargetPlatform::Ios;
+
+        let variables =
+            build_portable_command_variables(&spec, &[], &paths).expect("build recipe variables");
+        assert_eq!(
+            variables.get("DEPO_TARGET_PLATFORM").map(String::as_str),
+            Some("ios")
+        );
+
+        let environment = build_portable_command_environment(&spec, &[], &paths);
+        let selected = environment
+            .iter()
+            .filter(|(name, _)| name == "DEPO_TARGET_PLATFORM")
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].1, "ios");
+    }
 }
 
 #[cfg(test)]

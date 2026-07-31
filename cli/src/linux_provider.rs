@@ -3,7 +3,7 @@
 
 use crate::{
     canonical_path, package_store_root, registered_depofile_path, remove_existing_path,
-    resolve_dependency_specs, variant_for_target_arch, PackageOrigin, PackageSpec,
+    resolve_dependency_specs, variant_for_target, PackageOrigin, PackageSpec,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use metalor::runtime::linux_provider::{
@@ -271,7 +271,7 @@ impl LinuxProvider {
     }
 
     fn create_job(&self, spec: &PackageSpec, log: &mut String) -> Result<ProviderJob> {
-        let variant = variant_for_target_arch(&spec.target_arch)?;
+        let variant = variant_for_target(&spec.target_arch, spec.target_platform)?;
         let root = self
             .session
             .prepare_job_root(&self.runtime, &spec.name, log)?
@@ -352,7 +352,7 @@ impl LinuxProvider {
         log: &mut String,
     ) -> Result<()> {
         let script = format!(
-            "DEPOS_INTERNAL_LINUX_PROVIDER=1 DEPOS_PROVIDER_CACHE_ROOT={cache_root} exec {binary} internal-materialize-prepared --depos-root {depos_root} --name {name} --namespace {namespace} --version {version} --source-root {source_root} --store-root {store_root} --executable {binary}",
+            "DEPOS_INTERNAL_LINUX_PROVIDER=1 DEPOS_PROVIDER_CACHE_ROOT={cache_root} exec {binary} internal-materialize-prepared --depos-root {depos_root} --name {name} --namespace {namespace} --version {version} --source-root {source_root} --store-root {store_root} --executable {binary} --target-platform {target_platform}",
             cache_root = shell_quote(&self.cache_root),
             binary = shell_quote(&self.binary_path),
             depos_root = shell_quote(&job.depos_root),
@@ -361,6 +361,7 @@ impl LinuxProvider {
             version = shell_quote(&spec.version),
             source_root = shell_quote(remote_source_root),
             store_root = shell_quote(&job.store_root),
+            target_platform = shell_quote(spec.target_platform.as_str()),
         );
         self.session.run(&script, log)
     }

@@ -209,6 +209,51 @@ if (NOT DEFINED DEPOS_PROJECT_NAMESPACE OR DEPOS_PROJECT_NAMESPACE STREQUAL "")
   )
 endif()
 
+if (NOT DEFINED DEPOS_TARGET_PLATFORM OR DEPOS_TARGET_PLATFORM STREQUAL "")
+  set(
+    DEPOS_TARGET_PLATFORM
+    "host"
+    CACHE STRING
+    "Semantic target platform for dependency materialization"
+  )
+endif()
+set_property(CACHE DEPOS_TARGET_PLATFORM PROPERTY STRINGS host ios ios-simulator)
+if (NOT (DEPOS_TARGET_PLATFORM STREQUAL "host"
+         OR DEPOS_TARGET_PLATFORM STREQUAL "ios"
+         OR DEPOS_TARGET_PLATFORM STREQUAL "ios-simulator"))
+  message(
+    FATAL_ERROR
+    "Unsupported DEPOS_TARGET_PLATFORM='${DEPOS_TARGET_PLATFORM}'. Expected host, ios, or ios-simulator."
+  )
+endif()
+
+function(_depos_target_platform_args out_var)
+  if (DEPOS_TARGET_PLATFORM STREQUAL "host")
+    set(${out_var} "" PARENT_SCOPE)
+  else()
+    set(${out_var} --target-platform "${DEPOS_TARGET_PLATFORM}" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(_depos_require_target_platform_support executable_path)
+  if (DEPOS_TARGET_PLATFORM STREQUAL "host")
+    return()
+  endif()
+  execute_process(
+    COMMAND "${executable_path}" sync --help
+    RESULT_VARIABLE _depos_help_result
+    OUTPUT_VARIABLE _depos_help_stdout
+    ERROR_VARIABLE _depos_help_stderr
+  )
+  string(FIND "${_depos_help_stdout}\n${_depos_help_stderr}" "--target-platform" _depos_platform_option)
+  if (NOT _depos_help_result EQUAL 0 OR _depos_platform_option EQUAL -1)
+    message(
+      FATAL_ERROR
+      "DEPOS_TARGET_PLATFORM='${DEPOS_TARGET_PLATFORM}' requires a depos executable with --target-platform support. Set DEPOS_EXECUTABLE explicitly to a compatible current source build or release; the ${DEPOS_BOOTSTRAP_VERSION} project-local bootstrap supports host consumers only."
+    )
+  endif()
+endfunction()
+
 function(depos_default_root out_var)
   if (DEFINED DEPOS_ROOT AND NOT "${DEPOS_ROOT}" STREQUAL "")
     set(_depos_runtime_root "${DEPOS_ROOT}")
@@ -257,7 +302,12 @@ function(depos_default_variant out_var)
   if (_depos_arch STREQUAL "arm64")
     set(_depos_arch "aarch64")
   endif()
-  set(${out_var} "${_depos_arch}-${_depos_arch}_v1" PARENT_SCOPE)
+  if (DEPOS_TARGET_PLATFORM STREQUAL "host")
+    set(_depos_variant "${_depos_arch}-${_depos_arch}_v1")
+  else()
+    set(_depos_variant "${_depos_arch}-${_depos_arch}-${DEPOS_TARGET_PLATFORM}_v1")
+  endif()
+  set(${out_var} "${_depos_variant}" PARENT_SCOPE)
 endfunction()
 
 function(depos_manifest_profile out_var manifest_path)
@@ -989,7 +1039,9 @@ function(_depos_sync_current_requests)
   _depos_global_property_length(_depos_request_count DEPOS_REQUEST_LINES)
   _depos_runtime_mode_label(_depos_runtime_label ${_depos_local_mode})
   _depos_status("syncing ${_depos_request_count} dependency request(s) with ${_depos_runtime_label} depos")
+  _depos_require_target_platform_support("${_depos_executable}")
   _depos_register_pending_depofiles("${_depos_executable}" "${_depos_root}" ${_depos_local_mode})
+  _depos_target_platform_args(_depos_platform_args)
 
   execute_process(
     COMMAND
@@ -999,6 +1051,7 @@ function(_depos_sync_current_requests)
       "${_depos_root}"
       --manifest
       "${_depos_manifest_path}"
+      ${_depos_platform_args}
     RESULT_VARIABLE _depos_sync_result
     OUTPUT_VARIABLE _depos_sync_stdout
     ERROR_VARIABLE _depos_sync_stderr
@@ -1334,6 +1387,8 @@ function(depos_use)
 
   _depos_make_absolute_from_base(_depos_manifest "${DEPOS_USE_MANIFEST}" "${CMAKE_CURRENT_SOURCE_DIR}")
   _depos_resolve_runtime(_depos_executable _depos_root _depos_local_mode _depos_namespace)
+  _depos_require_target_platform_support("${_depos_executable}")
+  _depos_target_platform_args(_depos_platform_args)
   execute_process(
     COMMAND
       "${_depos_executable}"
@@ -1342,6 +1397,7 @@ function(depos_use)
       "${_depos_root}"
       --manifest
       "${_depos_manifest}"
+      ${_depos_platform_args}
     RESULT_VARIABLE _depos_sync_result
     OUTPUT_VARIABLE _depos_sync_stdout
     ERROR_VARIABLE _depos_sync_stderr

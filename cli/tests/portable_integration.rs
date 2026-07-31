@@ -3,6 +3,11 @@
 // Copyright 2026 Victor Stewart
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(target_os = "macos")]
+use depos::{
+    collect_statuses, collect_statuses_for_target_platform, sync_registry_for_target_platform,
+    unregister_depofile, PackageState, StatusOptions, TargetPlatform, UnregisterOptions,
+};
 use depos::{host_arch, sync_registry, SyncOptions};
 use std::ffi::OsString;
 use std::fs;
@@ -17,6 +22,109 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 const RELEASE_NAMESPACE: &str = "release";
+
+#[cfg(target_os = "macos")]
+#[test]
+fn empty_manifest_registry_remains_target_platform_specific() {
+    let sandbox = Sandbox::new();
+    sandbox.write("manifests/empty.cmake", "# no dependencies\n");
+    let output = sync_registry_for_target_platform(
+        &SyncOptions {
+            depos_root: sandbox.depos_root(),
+            manifest: sandbox.depos_root().join("manifests/empty.cmake"),
+            executable: None,
+        },
+        TargetPlatform::Ios,
+    )
+    .expect("sync empty iOS manifest");
+
+    let variant = output
+        .registry_dir
+        .parent()
+        .expect("registry variant")
+        .file_name()
+        .expect("variant name")
+        .to_string_lossy();
+    assert!(variant.ends_with("-ios_v1"), "{variant}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sync_preserves_host_and_ios_materializations_across_switches() {
+    let sandbox = Sandbox::new();
+    let package_name = "platform_switch_demo";
+    let archive = sandbox.create_source_archive(
+        "upstreams/platform_switch_demo",
+        &[("include/platform_switch_demo/demo.h", "#pragma once\n")],
+    );
+    sandbox.write(
+        &format!(
+            "depofiles/local/{package_name}/{RELEASE_NAMESPACE}/1.0.0/main.DepoFile"
+        ),
+        &format!(
+            "NAME {package_name}\nVERSION 1.0.0\nTARGET_PLATFORMS host ios\nSYSTEM_LIBS NEVER\nSOURCE URL {}\nTARGET {package_name}::{package_name} INTERFACE include\n",
+            portable_file_url(&archive)
+        ),
+    );
+    sandbox.write(
+        "manifests/platform_switch_demo.cmake",
+        "depos_require(platform_switch_demo VERSION 1.0.0)\n",
+    );
+    let options = SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/platform_switch_demo.cmake"),
+        executable: None,
+    };
+
+    let host = sync_registry(&options).expect("materialize host variant");
+    let ios = sync_registry_for_target_platform(&options, TargetPlatform::Ios)
+        .expect("materialize iOS variant");
+    sync_registry(&options).expect("reuse host variant after iOS materialization");
+
+    let status_options = StatusOptions {
+        depos_root: sandbox.depos_root(),
+        name: Some(package_name.to_string()),
+        namespace: Some(RELEASE_NAMESPACE.to_string()),
+        version: Some("1.0.0".to_string()),
+        refresh: true,
+    };
+    let host_status = collect_statuses(&status_options).expect("refresh host status");
+    let ios_status = collect_statuses_for_target_platform(&status_options, TargetPlatform::Ios)
+        .expect("refresh iOS status");
+    assert_eq!(host_status[0].state, PackageState::Green);
+    assert_eq!(ios_status[0].state, PackageState::Green);
+    assert!(host_status[0].message.contains(&host_arch()));
+    assert!(ios_status[0].message.contains("-ios_v1"));
+
+    let mut exports = Vec::new();
+    for output in [host, ios] {
+        let variant = output
+            .registry_dir
+            .parent()
+            .expect("registry variant")
+            .file_name()
+            .expect("variant name");
+        let store = sandbox.depos_root().join("store").join(variant);
+        let export = store.join(format!(
+            "{package_name}/{RELEASE_NAMESPACE}/1.0.0/include/platform_switch_demo/demo.h"
+        ));
+        assert!(export.is_file());
+        exports.push(export);
+    }
+
+    unregister_depofile(&UnregisterOptions {
+        depos_root: sandbox.depos_root(),
+        name: package_name.to_string(),
+        namespace: RELEASE_NAMESPACE.to_string(),
+        version: "1.0.0".to_string(),
+    })
+    .expect("unregister all target variants");
+    for export in exports {
+        assert!(!export.exists(), "{} survived unregister", export.display());
+    }
+}
 
 #[test]
 fn sync_extracts_exact_multi_root_db_zip_url_source() {

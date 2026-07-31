@@ -133,9 +133,29 @@ test -n "$root"
 test "$version" = "]=] "${DEPOS_BOOTSTRAP_VERSION}" [=["
 test "$crate" = "depos"
 mkdir -p "$root/bin"
-cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"
+source_binary="${DEPOS_TEST_FAKE_CARGO_SOURCE_BINARY:-]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[}"
+cp "$source_binary" "$root/bin/depos"
 ]=])
     file(CHMOD "${DEPOS_TEST_FAKE_CARGO}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+
+    set(DEPOS_TEST_HOST_ONLY_BINARY "${DEPOS_TEST_TOOLS_DIR}/depos-host-only")
+    file(WRITE "${DEPOS_TEST_HOST_ONLY_BINARY}" [=[
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "sync" && "${2:-}" == "--help" ]]; then
+  echo "Usage: depos sync --depos-root <DEPOS_ROOT> --manifest <MANIFEST>"
+  exit 0
+fi
+for argument in "$@"; do
+  if [[ "$argument" == "--target-platform" ]]; then
+    echo "unexpected argument '--target-platform'" >&2
+    exit 2
+  fi
+done
+exec "]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[" "$@"
+]=])
+    file(CHMOD "${DEPOS_TEST_HOST_ONLY_BINARY}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
   endif()
 
   set(DEPOS_SMOKE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke")
@@ -191,6 +211,12 @@ cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"
       -DDEPOS_ALLOW_SYSTEM_EXECUTABLE=OFF
       -DDEPOS_CARGO_EXECUTABLE=${DEPOS_TEST_FAKE_CARGO}
   )
+  if (NOT WIN32)
+    set_tests_properties(
+      depos-cmake-bootstrap-configure
+      PROPERTIES ENVIRONMENT "DEPOS_TEST_FAKE_CARGO_SOURCE_BINARY=${DEPOS_TEST_HOST_ONLY_BINARY}"
+    )
+  endif()
   add_test(
     NAME depos-cmake-bootstrap-build
     COMMAND
@@ -210,6 +236,28 @@ cp ]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[ "$root/bin/depos"
       --no-tests=error
   )
   set_tests_properties(depos-cmake-bootstrap-run PROPERTIES DEPENDS depos-cmake-bootstrap-build)
+
+  if (NOT WIN32)
+    set(DEPOS_SMOKE_TARGET_PLATFORM_OLD_CLI_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/smoke-target-platform-old-cli")
+    add_test(
+      NAME depos-cmake-target-platform-requires-compatible-cli
+      COMMAND
+        "${CMAKE_COMMAND}"
+        --fresh
+        -S "${DEPOS_SMOKE_SOURCE_DIR}"
+        -B "${DEPOS_SMOKE_TARGET_PLATFORM_OLD_CLI_BINARY_DIR}"
+        -DDEPOS_SMOKE_STYLE=all
+        -DDEPOS_EXECUTABLE=${DEPOS_TEST_HOST_ONLY_BINARY}
+        -DDEPOS_ROOT=${DEPOS_SMOKE_TARGET_PLATFORM_OLD_CLI_BINARY_DIR}/depos-root
+        -DDEPOS_TARGET_PLATFORM=ios
+    )
+    set_tests_properties(
+      depos-cmake-target-platform-requires-compatible-cli
+      PROPERTIES
+        WILL_FAIL TRUE
+        PASS_REGULAR_EXPRESSION "requires a depos executable with --target-platform support"
+    )
+  endif()
 
   set(DEPOS_SMOKE_INVALID_ALL_FILE_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/smoke-invalid-all-file")
   set(DEPOS_SMOKE_INVALID_ALL_FILE "${DEPOS_SMOKE_SOURCE_DIR}/fixtures/local/zlib/release/1.3.2/main.DepoFile")

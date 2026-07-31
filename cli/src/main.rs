@@ -6,8 +6,9 @@ use clap::{Parser, Subcommand};
 #[cfg(target_os = "linux")]
 use depos::InternalMaterializePreparedOptions;
 use depos::{
-    collect_statuses, default_depos_root_path, register_depofile, registry_dir_from_manifest,
-    sync_registry, unregister_depofile, RegisterOptions, StatusOptions, SyncOptions,
+    collect_statuses_for_target_platform, default_depos_root_path, register_depofile,
+    registry_dir_from_manifest_for_target_platform, sync_registry_for_target_platform,
+    unregister_depofile, RegisterOptions, StatusOptions, SyncOptions, TargetPlatform,
     UnregisterOptions,
 };
 #[cfg(target_os = "linux")]
@@ -29,12 +30,16 @@ enum Command {
         depos_root: PathBuf,
         #[arg(long)]
         manifest: PathBuf,
+        #[arg(long, default_value = "host")]
+        target_platform: String,
     },
     Sync {
         #[arg(long, default_value_os_t = default_depos_root())]
         depos_root: PathBuf,
         #[arg(long)]
         manifest: PathBuf,
+        #[arg(long, default_value = "host")]
+        target_platform: String,
     },
     #[cfg(target_os = "linux")]
     #[command(hide = true, name = "internal-run")]
@@ -75,6 +80,8 @@ enum Command {
         store_root: PathBuf,
         #[arg(long)]
         executable: PathBuf,
+        #[arg(long, default_value = "host")]
+        target_platform: String,
     },
     Register {
         #[arg(long, default_value_os_t = default_depos_root())]
@@ -105,6 +112,8 @@ enum Command {
         version: Option<String>,
         #[arg(long)]
         refresh: bool,
+        #[arg(long, default_value = "host")]
+        target_platform: String,
     },
 }
 
@@ -129,19 +138,28 @@ fn real_main() -> Result<()> {
         Command::RegistryDir {
             depos_root,
             manifest,
+            target_platform,
         } => {
-            let registry_dir = registry_dir_from_manifest(&depos_root, &manifest)?;
+            let registry_dir = registry_dir_from_manifest_for_target_platform(
+                &depos_root,
+                &manifest,
+                TargetPlatform::parse(&target_platform)?,
+            )?;
             println!("{}", registry_dir.display());
         }
         Command::Sync {
             depos_root,
             manifest,
+            target_platform,
         } => {
-            let output = sync_registry(&SyncOptions {
-                depos_root,
-                manifest,
-                executable: Some(current_exe),
-            })?;
+            let output = sync_registry_for_target_platform(
+                &SyncOptions {
+                    depos_root,
+                    manifest,
+                    executable: Some(current_exe),
+                },
+                TargetPlatform::parse(&target_platform)?,
+            )?;
             println!("{}", output.registry_dir.display());
             for package in output.selected {
                 println!("{}", package.spec.package_id());
@@ -207,6 +225,7 @@ fn real_main() -> Result<()> {
             source_root,
             store_root,
             executable,
+            target_platform,
         } => {
             depos::internal_materialize_prepared(&InternalMaterializePreparedOptions {
                 depos_root,
@@ -216,6 +235,7 @@ fn real_main() -> Result<()> {
                 source_root,
                 store_root,
                 executable,
+                target_platform: TargetPlatform::parse(&target_platform)?,
             })?;
         }
         Command::Register {
@@ -249,14 +269,18 @@ fn real_main() -> Result<()> {
             namespace,
             version,
             refresh,
+            target_platform,
         } => {
-            let statuses = collect_statuses(&StatusOptions {
-                depos_root,
-                name,
-                namespace,
-                version,
-                refresh,
-            })?;
+            let statuses = collect_statuses_for_target_platform(
+                &StatusOptions {
+                    depos_root,
+                    name,
+                    namespace,
+                    version,
+                    refresh,
+                },
+                TargetPlatform::parse(&target_platform)?,
+            )?;
             for status in statuses {
                 println!("{status}");
             }

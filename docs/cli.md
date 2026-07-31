@@ -24,6 +24,16 @@ Sync a manifest:
 depos sync --manifest /path/to/deps.cmake
 ```
 
+On macOS, materialize a distinct iPhoneOS or simulator variant:
+
+```bash
+depos sync --manifest /path/to/deps.cmake --target-platform ios
+depos sync --manifest /path/to/deps.cmake --target-platform ios-simulator
+```
+
+`--target-platform` accepts `host` (the default), `ios`, or `ios-simulator`.
+The two iOS values fail closed on non-macOS hosts.
+
 Use a project-local root:
 
 ```bash
@@ -36,8 +46,11 @@ Inspect state:
 ```bash
 depos status
 depos status --refresh
+depos status --target-platform ios
 depos registry-dir --manifest /path/to/deps.cmake
 ```
+
+Status and materialization logs are stored separately for each target platform.
 
 ## Root Layout
 

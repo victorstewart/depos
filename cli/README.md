@@ -23,7 +23,11 @@ directory is for the library's dependencies, not for the consumer-facing publish
 depos register --file /path/to/main.DepoFile --namespace release
 depos sync --manifest /path/to/deps.cmake
 depos status
+depos sync --manifest /path/to/deps.cmake --target-platform ios
 ```
+
+`--target-platform` accepts `host`, `ios`, and `ios-simulator`; iOS targets
+require a native macOS host and keep their artifacts and status separate.
 
 Use a project-local root if you do not want the default shared root:
 

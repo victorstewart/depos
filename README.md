@@ -45,6 +45,7 @@ Why this exists: stop letting `/usr`, `/lib`, `/usr/local`, or some random SDK d
 - CMake-friendly imported targets
 - Linux isolated build roots when host leakage matters
 - Native macOS and Windows `BUILD_ROOT SYSTEM` support
+- Separate native macOS host, iPhoneOS, and iOS Simulator materializations
 - [EXPERIMENTAL] macOS and Windows `BUILD_ROOT OCI <image>` support through a local Linux provider
 
 ## Choose A Root

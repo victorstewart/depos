@@ -109,8 +109,15 @@ Useful knobs:
 
 - `DEPOS_EXECUTABLE`
 - `DEPOS_ROOT`
+- `DEPOS_TARGET_PLATFORM`
 - `DEPOS_BOOTSTRAP_VERSION`
 - `DEPOS_BOOTSTRAP_DIR`
 - `DEPOS_ALLOW_SYSTEM_EXECUTABLE`
+
+`DEPOS_TARGET_PLATFORM` accepts `host` (the default), `ios`, or
+`ios-simulator`. Set it before the first `depos_depend(...)` call. iOS values
+require a native macOS host and are materialized into platform-specific
+registry, store, status, and log paths. The helper rejects an older CLI that
+does not understand the requested non-host platform.
 
 For install/bootstrap details, see [getting-started.md](getting-started.md). For runtime semantics, see [build-roots.md](build-roots.md).

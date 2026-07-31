@@ -98,6 +98,14 @@ LINK openssl openssl::crypto openssl::ssl
 - `BUILD_ROOT OCI <image>`: pinned Linux rootfs
 - `TOOLCHAIN ROOTFS`: Linux-only rootfs toolchain mode
 - `BUILD_ARCH` and `TARGET_ARCH`: build/target split for advanced Linux flows
+- `TARGET_PLATFORMS <platform...>`: explicit recipe support; defaults to `host`
+
+Every build recipe receives `DEPO_TARGET_PLATFORM` with one of `host`, `ios`,
+or `ios-simulator`. The CLI/CMake caller selects it, but every selected
+`DepoFile` must explicitly include a non-host value in `TARGET_PLATFORMS` before
+Depos will materialize it. Apple targets also require a native macOS
+`BUILD_ROOT SYSTEM` pipeline. Recipes use the value to choose the matching SDK
+while keeping the same package identity.
 
 On Linux, `DEPOS_LINUX_ISOLATION=auto` tries rootless user namespaces first. If that is unavailable, `BUILD_ROOT SYSTEM` may fall back to host-staged execution, but `BUILD_ROOT SCRATCH` and `BUILD_ROOT OCI <image>` fail rather than weakening their root contract.
 
