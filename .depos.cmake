@@ -492,11 +492,14 @@ function(_depos_resolve_runtime out_executable out_root out_local_mode out_names
   get_property(_depos_cached_local_mode GLOBAL PROPERTY DEPOS_RESOLVED_LOCAL_MODE)
   get_property(_depos_cached_namespace GLOBAL PROPERTY DEPOS_RESOLVED_NAMESPACE)
   if (NOT "${_depos_cached_executable}" STREQUAL "" AND EXISTS "${_depos_cached_executable}")
-    set(${out_executable} "${_depos_cached_executable}" PARENT_SCOPE)
-    set(${out_root} "${_depos_cached_root}" PARENT_SCOPE)
-    set(${out_local_mode} "${_depos_cached_local_mode}" PARENT_SCOPE)
-    set(${out_namespace} "${_depos_cached_namespace}" PARENT_SCOPE)
-    return()
+    _depos_effective_root(_depos_requested_cached_root ${_depos_cached_local_mode})
+    if ("${_depos_cached_root}" STREQUAL "${_depos_requested_cached_root}")
+      set(${out_executable} "${_depos_cached_executable}" PARENT_SCOPE)
+      set(${out_root} "${_depos_cached_root}" PARENT_SCOPE)
+      set(${out_local_mode} "${_depos_cached_local_mode}" PARENT_SCOPE)
+      set(${out_namespace} "${_depos_cached_namespace}" PARENT_SCOPE)
+      return()
+    endif()
   endif()
 
   if (DEFINED DEPOS_EXECUTABLE AND NOT "${DEPOS_EXECUTABLE}" STREQUAL "")
@@ -539,8 +542,10 @@ function(_depos_resolve_runtime out_executable out_root out_local_mode out_names
     _depos_state_namespace
     _depos_state_version
   )
+  _depos_effective_root(_depos_requested_local_root TRUE)
   if ("${_depos_state_mode}" STREQUAL "LOCAL"
       AND "${_depos_state_version}" STREQUAL "${DEPOS_BOOTSTRAP_VERSION}"
+      AND "${_depos_state_root}" STREQUAL "${_depos_requested_local_root}"
       AND EXISTS "${_depos_state_executable}")
     _depos_cache_runtime(
       "${_depos_state_executable}"

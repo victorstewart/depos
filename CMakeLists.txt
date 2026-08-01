@@ -237,6 +237,25 @@ exec "]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[" "$@"
   )
   set_tests_properties(depos-cmake-bootstrap-run PROPERTIES DEPENDS depos-cmake-bootstrap-build)
 
+  set(DEPOS_SMOKE_BOOTSTRAP_ROOT_OVERRIDE_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/smoke-bootstrap-root-override")
+  add_test(
+    NAME depos-cmake-bootstrap-root-override-configure
+    COMMAND
+      "${CMAKE_COMMAND}"
+      --fresh
+      -S "${DEPOS_SMOKE_SOURCE_DIR}"
+      -B "${DEPOS_SMOKE_BOOTSTRAP_ROOT_OVERRIDE_BINARY_DIR}"
+      -DDEPOS_SMOKE_STYLE=all
+      -DDEPOS_BOOTSTRAP_DIR=${DEPOS_SMOKE_BOOTSTRAP_BINARY_DIR}/.depos
+      -DDEPOS_ROOT=${DEPOS_SMOKE_BOOTSTRAP_ROOT_OVERRIDE_BINARY_DIR}/depos-root
+      -DDEPOS_ALLOW_SYSTEM_EXECUTABLE=OFF
+      -DDEPOS_CARGO_EXECUTABLE=${DEPOS_TEST_FAKE_CARGO}
+  )
+  set_tests_properties(
+    depos-cmake-bootstrap-root-override-configure
+    PROPERTIES DEPENDS depos-cmake-bootstrap-run
+  )
+
   if (NOT WIN32)
     set(DEPOS_SMOKE_TARGET_PLATFORM_OLD_CLI_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/smoke-target-platform-old-cli")
     add_test(

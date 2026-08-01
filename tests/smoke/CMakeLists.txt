@@ -53,6 +53,15 @@ if (DEPOS_SMOKE_STYLE STREQUAL "all")
 else()
   depos_link(depos-smoke bitsery itoa zlib)
 endif()
+get_property(_depos_smoke_resolved_root GLOBAL PROPERTY DEPOS_RESOLVED_ROOT)
+file(REAL_PATH "${DEPOS_ROOT}" _depos_smoke_expected_root)
+file(REAL_PATH "${_depos_smoke_resolved_root}" _depos_smoke_actual_root)
+if (NOT _depos_smoke_actual_root STREQUAL _depos_smoke_expected_root)
+  message(
+    FATAL_ERROR
+    "depos resolved stale root '${_depos_smoke_actual_root}' instead of '${_depos_smoke_expected_root}'"
+  )
+endif()
 target_compile_features(depos-smoke PRIVATE cxx_std_20)
 
 enable_testing()
