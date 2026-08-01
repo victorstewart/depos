@@ -18,7 +18,7 @@ set(DEPOS_CLI_BUILT_BINARY "${DEPOS_CLI_TARGET_DIR}/debug/depos${CMAKE_EXECUTABL
 file(GLOB_RECURSE DEPOS_CLI_SOURCES
   "${DEPOS_CLI_SOURCE_DIR}/src/*.rs"
   "${DEPOS_CLI_SOURCE_DIR}/Cargo.toml"
-  "${DEPOS_CLI_SOURCE_DIR}/Cargo.lock"
+  "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.lock"
 )
 
 add_custom_command(
