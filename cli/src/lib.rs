@@ -8561,11 +8561,13 @@ fn copy_embedded_depofiles_into_catalog(
                 .join(&depofile_spec.version)
                 .join("main.DepoFile");
             if destination.exists() {
-                let existing = fs::read(&destination)
-                    .with_context(|| format!("failed to read {}", destination.display()))?;
-                let current = fs::read(&depofile_path)
-                    .with_context(|| format!("failed to read {}", depofile_path.display()))?;
-                if existing != current {
+                if !embedded_depofiles_match(
+                    &destination,
+                    &depofile_path,
+                    &depofile_spec.name,
+                    &owner.namespace,
+                    &depofile_spec.version,
+                )? {
                     bail!(
                         "embedded DepoFile conflict for '{}[{}]@{}' while preparing package '{}': {} and {} differ",
                         depofile_spec.name,
@@ -8592,6 +8594,19 @@ fn copy_embedded_depofiles_into_catalog(
         }
     }
     Ok(())
+}
+
+fn embedded_depofiles_match(
+    existing: &Path,
+    current: &Path,
+    name: &str,
+    namespace: &str,
+    version: &str,
+) -> Result<bool> {
+    Ok(
+        parse_registered_depofile(existing, name, namespace, version)?
+            == parse_registered_depofile(current, name, namespace, version)?,
+    )
 }
 
 fn embedded_depofile_roots(
@@ -11467,6 +11482,51 @@ mod target_platform_tests {
             .collect::<Vec<_>>();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].1, "ios");
+    }
+}
+
+#[cfg(test)]
+mod embedded_depofile_tests {
+    use super::*;
+
+    const AEGIS: &str = "NAME aegis\nVERSION 0.10.1\nSOURCE URL https://example.test/aegis.tar.gz\nBUILD_SYSTEM CMAKE\nTARGET aegis::aegis STATIC lib/libaegis.a INTERFACE include\n";
+
+    #[test]
+    fn comments_do_not_create_embedded_depofile_conflicts() {
+        let temp = tempfile::tempdir().expect("create embedded DepoFile fixture root");
+        let existing = temp.path().join("existing.DepoFile");
+        let current = temp.path().join("current.DepoFile");
+        fs::write(&existing, AEGIS).expect("write existing DepoFile");
+        fs::write(
+            &current,
+            format!(
+                "# Copyright 2026 Victor Stewart\n# SPDX-License-Identifier: Apache-2.0\n{AEGIS}"
+            ),
+        )
+        .expect("write commented DepoFile");
+
+        assert!(
+            embedded_depofiles_match(&existing, &current, "aegis", "release", "0.10.1")
+                .expect("compare semantically identical DepoFiles")
+        );
+    }
+
+    #[test]
+    fn semantic_embedded_depofile_conflicts_remain_fatal() {
+        let temp = tempfile::tempdir().expect("create embedded DepoFile fixture root");
+        let existing = temp.path().join("existing.DepoFile");
+        let current = temp.path().join("current.DepoFile");
+        fs::write(&existing, AEGIS).expect("write existing DepoFile");
+        fs::write(
+            &current,
+            AEGIS.replace("aegis.tar.gz", "different-aegis.tar.gz"),
+        )
+        .expect("write conflicting DepoFile");
+
+        assert!(
+            !embedded_depofiles_match(&existing, &current, "aegis", "release", "0.10.1")
+                .expect("compare conflicting DepoFiles")
+        );
     }
 }
 
