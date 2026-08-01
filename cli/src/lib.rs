@@ -438,6 +438,13 @@ impl PackageSpec {
         }
         dedup_paths(paths)
     }
+
+    fn needs_command_pipeline(&self) -> bool {
+        !self.configure.is_empty()
+            || !self.build.is_empty()
+            || !self.install.is_empty()
+            || !self.stage_entries.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -522,6 +529,25 @@ struct MaterializationState {
     store_root: PathBuf,
     depofile_hash: String,
     build_key: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MaterializationEngineIdentity {
+    path: PathBuf,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ToolchainInputIdentity {
+    declared_path: String,
+    resolved_path: PathBuf,
+    tree_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MaterializationCacheInputs {
+    engine: MaterializationEngineIdentity,
+    toolchain_inputs: BTreeMap<String, ToolchainInputIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -919,11 +945,7 @@ pub fn internal_materialize_prepared(options: &InternalMaterializePreparedOption
         spec.package_id(),
         source_root.display()
     ));
-    let result = if spec.configure.is_empty()
-        && spec.build.is_empty()
-        && spec.install.is_empty()
-        && spec.stage_entries.is_empty()
-    {
+    let result = if !spec.needs_command_pipeline() {
         copy_declared_exports(&depos_root, &source_root, &store_root, &spec, &mut log)
     } else {
         execute_command_pipeline(
@@ -954,21 +976,40 @@ fn materialize_local_packages(
     selected: &[ResolvedPackage],
     executable: &Path,
 ) -> Result<()> {
+    for package in selected.iter().filter(|package| {
+        package.spec.origin == PackageOrigin::Local && package.spec.needs_command_pipeline()
+    }) {
+        validate_supported_command_pipeline(&package.spec)?;
+    }
+    let cache_inputs = MaterializationCacheInputs::resolve(selected, executable)?;
     for layer in local_materialization_layers(depos_root, selected)? {
         if layer.len() == 1 {
-            materialize_one_local_package(depos_root, variant, layer[0], executable)?;
+            materialize_one_local_package(
+                depos_root,
+                variant,
+                layer[0],
+                executable,
+                &cache_inputs,
+            )?;
             continue;
         }
 
         let mut first_error = None;
         std::thread::scope(|scope| {
             let mut handles = Vec::new();
+            let cache_inputs = &cache_inputs;
             for package in &layer {
                 let package = *package;
                 handles.push((
                     package.spec.package_id(),
                     scope.spawn(move || {
-                        materialize_one_local_package(depos_root, variant, package, executable)
+                        materialize_one_local_package(
+                            depos_root,
+                            variant,
+                            package,
+                            executable,
+                            cache_inputs,
+                        )
                     }),
                 ));
             }
@@ -1000,16 +1041,85 @@ fn materialize_local_packages(
     Ok(())
 }
 
+impl MaterializationCacheInputs {
+    fn resolve(selected: &[ResolvedPackage], executable: &Path) -> Result<Self> {
+        let engine = materialization_engine_identity(executable)?;
+        let mut toolchain_inputs = BTreeMap::new();
+        for value in selected
+            .iter()
+            .filter(|package| package.spec.origin == PackageOrigin::Local)
+            .flat_map(|package| &package.spec.toolchain_inputs)
+        {
+            if toolchain_inputs.contains_key(value) {
+                continue;
+            }
+            toolchain_inputs.insert(value.clone(), toolchain_input_identity(Path::new(value))?);
+        }
+        Ok(Self {
+            engine,
+            toolchain_inputs,
+        })
+    }
+
+    fn for_package<'a>(&'a self, spec: &PackageSpec) -> Result<Vec<&'a ToolchainInputIdentity>> {
+        spec.toolchain_inputs
+            .iter()
+            .map(|value| {
+                self.toolchain_inputs.get(value).with_context(|| {
+                    format!(
+                        "missing materialization identity for TOOLCHAIN_INPUT '{}'",
+                        value
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+fn materialization_engine_identity(executable: &Path) -> Result<MaterializationEngineIdentity> {
+    let path = canonical_path(executable)
+        .with_context(|| format!("failed to identify Depos engine {}", executable.display()))?;
+    if !path.is_file() {
+        bail!(
+            "Depos materialization engine '{}' is not a regular file",
+            path.display()
+        );
+    }
+    Ok(MaterializationEngineIdentity {
+        sha256: hash_file_sha256(&path)?,
+        path,
+    })
+}
+
+fn toolchain_input_identity(path: &Path) -> Result<ToolchainInputIdentity> {
+    validate_toolchain_input_for_identity(path)?;
+    let resolved_path = canonical_path(path)
+        .with_context(|| format!("failed to resolve TOOLCHAIN_INPUT '{}'", path.display()))?;
+    Ok(ToolchainInputIdentity {
+        declared_path: path.display().to_string(),
+        tree_sha256: hash_toolchain_input_tree(path, &resolved_path)?,
+        resolved_path,
+    })
+}
+
 fn materialize_one_local_package(
     depos_root: &Path,
     variant: &str,
     package: &ResolvedPackage,
     executable: &Path,
+    cache_inputs: &MaterializationCacheInputs,
 ) -> Result<()> {
     let store_root = package_store_root(depos_root, variant, &package.spec);
     fs::create_dir_all(&store_root)
         .with_context(|| format!("failed to create {}", store_root.display()))?;
-    match materialize_local_package(depos_root, variant, &store_root, &package.spec, executable) {
+    match materialize_local_package(
+        depos_root,
+        variant,
+        &store_root,
+        &package.spec,
+        executable,
+        cache_inputs,
+    ) {
         Ok(message) => {
             write_materialization_status(depos_root, &package.spec, PackageState::Green, message)?;
             Ok(())
@@ -1241,6 +1351,7 @@ fn materialize_local_package(
     store_root: &Path,
     spec: &PackageSpec,
     executable: &Path,
+    cache_inputs: &MaterializationCacheInputs,
 ) -> Result<String> {
     let mut log = String::new();
     log.push_str(&format!("materializing {}\n", spec.package_id()));
@@ -1261,10 +1372,14 @@ fn materialize_local_package(
     let depofile_hash = registered_depofile_hash(depos_root, spec)?;
     let dependency_keys = dependency_materialization_keys(depos_root, spec, variant)?;
     let resolved_source = resolve_package_source(depos_root, spec, &mut log)?;
+    let toolchain_inputs = cache_inputs.for_package(spec)?;
     let build_key = materialization_build_key(
         &depofile_hash,
         &resolved_source.provenance,
         &dependency_keys,
+        spec.target_platform,
+        &cache_inputs.engine,
+        &toolchain_inputs,
     );
     if materialization_is_current(
         previous_state.as_ref(),
@@ -1294,11 +1409,7 @@ fn materialize_local_package(
     prepare_package_source(&resolved_source.preparation, &mut log)?;
     let source_root = resolve_source_root(&resolved_source.source_root, spec)?;
     write_source_provenance(depos_root, spec, &resolved_source.provenance)?;
-    let materialize_result = if spec.configure.is_empty()
-        && spec.build.is_empty()
-        && spec.install.is_empty()
-        && spec.stage_entries.is_empty()
-    {
+    let materialize_result = if !spec.needs_command_pipeline() {
         copy_declared_exports(depos_root, &source_root, store_root, spec, &mut log)
     } else {
         execute_command_pipeline(
@@ -1722,8 +1833,16 @@ fn execute_linux_namespaced_command_pipeline(
         .with_context(|| format!("failed to create {}", work_tmp.display()))?;
 
     let variables = build_command_variables(spec, &dependency_specs)?;
-    let base_env = build_command_environment(spec, &dependency_specs);
-    let mounts = build_command_mounts(spec, source_root, &variant_root)?;
+    let external_cmake = if matches!(
+        (&spec.build_root, spec.build_system),
+        (BuildRoot::System, BuildSystem::Cmake)
+    ) {
+        external_system_tool_installation("cmake")?
+    } else {
+        None
+    };
+    let base_env = build_command_environment(spec, &dependency_specs, external_cmake.as_ref())?;
+    let mounts = build_command_mounts(spec, source_root, &variant_root, external_cmake.as_ref())?;
     let emulator = prepare_command_emulator(&container_root, &host, spec, log)?;
     let phase_context = PhaseExecutionContext {
         spec,
@@ -2611,6 +2730,11 @@ fn execute_portable_command_phase(
     commands: &[Vec<String>],
     log: &mut String,
 ) -> Result<()> {
+    let runtime_paths = base_env
+        .iter()
+        .find_map(|(name, value)| (name == "PATH").then_some(value))
+        .map(|value| std::env::split_paths(value).collect::<Vec<_>>())
+        .unwrap_or_default();
     for command in commands {
         let is_shell_wrapper =
             command.len() == 4 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c";
@@ -2629,7 +2753,8 @@ fn execute_portable_command_phase(
         if argv.is_empty() {
             bail!("{} command array must not be empty", phase_name);
         }
-        let resolved_executable = resolve_phase_executable_for_spec(spec, cwd, &argv[0])?;
+        let resolved_executable =
+            resolve_phase_executable_for_spec(spec, cwd, &argv[0], &runtime_paths)?;
         let executable_path =
             translate_portable_phase_executable(&paths.job_root, &resolved_executable)?;
         let host_cwd = portable_cell_host_path(&paths.job_root, cwd)?;
@@ -3066,7 +3191,8 @@ rustup target add {target_triple}
 fn build_command_environment(
     spec: &PackageSpec,
     dependency_specs: &[PackageSpec],
-) -> Vec<(String, String)> {
+    external_cmake: Option<&ExternalSystemToolInstallation>,
+) -> Result<Vec<(String, String)>> {
     let dependency_roots = dependency_specs
         .iter()
         .map(|dependency| {
@@ -3098,6 +3224,12 @@ fn build_command_environment(
     } else {
         path_value
     };
+    let path_value = external_cmake.map_or(path_value.clone(), |installation| {
+        prepend_path_entries(
+            &installation.executable_dir.display().to_string(),
+            &path_value,
+        )
+    });
     let home_value = if provider_oci_mode {
         "/root".to_string()
     } else {
@@ -3274,7 +3406,7 @@ fn build_command_environment(
             ("CPLUS_INCLUDE_PATH".to_string(), String::new()),
         ]);
     }
-    env
+    Ok(env)
 }
 
 #[cfg(target_os = "linux")]
@@ -3282,6 +3414,7 @@ fn build_command_mounts(
     spec: &PackageSpec,
     source_root: &Path,
     variant_root: &Path,
+    external_cmake: Option<&ExternalSystemToolInstallation>,
 ) -> Result<Vec<BindMount>> {
     let mut mounts = Vec::new();
     mounts.push(BindMount {
@@ -3312,6 +3445,15 @@ fn build_command_mounts(
                     });
                 }
             }
+            if let Some(prefix) =
+                external_cmake.and_then(|installation| installation.prefix.as_ref())
+            {
+                mounts.push(BindMount {
+                    destination: prefix.display().to_string(),
+                    source: prefix.clone(),
+                    read_only: true,
+                });
+            }
             if let Some(cargo_home) = host_rust_toolchain_dir("CARGO_HOME", ".cargo") {
                 mounts.push(BindMount {
                     source: cargo_home,
@@ -3328,7 +3470,7 @@ fn build_command_mounts(
             }
         }
         BuildRoot::Scratch => {
-            for (source, destination) in normalized_toolchain_inputs(&spec.toolchain_inputs) {
+            for (source, destination) in normalized_toolchain_inputs(&spec.toolchain_inputs)? {
                 mounts.push(BindMount {
                     destination,
                     source,
@@ -3337,7 +3479,7 @@ fn build_command_mounts(
             }
         }
         BuildRoot::Oci(_) => {
-            for (source, destination) in normalized_toolchain_inputs(&spec.toolchain_inputs) {
+            for (source, destination) in normalized_toolchain_inputs(&spec.toolchain_inputs)? {
                 mounts.push(BindMount {
                     destination,
                     source,
@@ -3371,6 +3513,12 @@ fn execute_command_phase(
     commands: &[Vec<String>],
     log: &mut String,
 ) -> Result<()> {
+    let runtime_paths = context
+        .base_env
+        .iter()
+        .find_map(|(name, value)| (name == "PATH").then_some(value))
+        .map(|value| std::env::split_paths(value).collect::<Vec<_>>())
+        .unwrap_or_default();
     for command in commands {
         let is_shell_wrapper =
             command.len() == 4 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c";
@@ -3392,7 +3540,8 @@ fn execute_command_phase(
         if argv.is_empty() {
             bail!("{} command array must not be empty", phase_name);
         }
-        let resolved_executable = resolve_phase_executable_for_spec(context.spec, cwd, &argv[0])?;
+        let resolved_executable =
+            resolve_phase_executable_for_spec(context.spec, cwd, &argv[0], &runtime_paths)?;
         log.push_str(&format!(
             "run {} in {}: {}\n",
             phase_name,
@@ -3423,10 +3572,11 @@ fn resolve_phase_executable_for_spec(
     spec: &PackageSpec,
     cwd: &str,
     executable: &str,
+    runtime_paths: &[PathBuf],
 ) -> Result<String> {
     let path = Path::new(executable);
     if path.is_absolute() || !executable.contains('/') {
-        return resolve_phase_executable_for_backend(spec, executable);
+        return resolve_phase_executable_for_backend(spec, executable, runtime_paths);
     }
 
     let cwd_path = Path::new(cwd);
@@ -3452,15 +3602,23 @@ fn resolve_phase_executable_for_spec(
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_phase_executable_for_backend(spec: &PackageSpec, executable: &str) -> Result<String> {
+fn resolve_phase_executable_for_backend(
+    spec: &PackageSpec,
+    executable: &str,
+    runtime_paths: &[PathBuf],
+) -> Result<String> {
     match (&spec.build_root, &spec.toolchain) {
         (BuildRoot::Oci(_), ToolchainSource::Rootfs) => Ok(executable.to_string()),
-        _ => resolve_runtime_executable(executable),
+        _ => resolve_runtime_executable_from_paths(executable, runtime_paths),
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn resolve_phase_executable_for_backend(_spec: &PackageSpec, executable: &str) -> Result<String> {
+fn resolve_phase_executable_for_backend(
+    _spec: &PackageSpec,
+    executable: &str,
+    _runtime_paths: &[PathBuf],
+) -> Result<String> {
     Ok(executable.to_string())
 }
 
@@ -3559,17 +3717,124 @@ fn run_isolated_phase(
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_runtime_executable(executable: &str) -> Result<String> {
-    if executable.starts_with('/') {
-        return Ok(executable.to_string());
+fn resolve_host_runtime_executable(executable: &str) -> Result<String> {
+    let search_paths = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    resolve_runtime_executable_from_paths(executable, &search_paths)
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_runtime_executable_from_paths(
+    executable: &str,
+    search_paths: &[PathBuf],
+) -> Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable_path = Path::new(executable);
+    let resolve = |candidate: &Path| -> Option<String> {
+        let metadata = candidate.metadata().ok()?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            return None;
+        }
+        Some(candidate.display().to_string())
+    };
+    if executable_path.is_absolute() {
+        return resolve(executable_path)
+            .ok_or_else(|| anyhow!("unable to resolve executable '{}'", executable));
     }
-    for prefix in ["/usr/bin", "/bin"] {
-        let candidate = Path::new(prefix).join(executable);
-        if candidate.exists() {
-            return Ok(candidate.display().to_string());
+    if executable_path.components().count() != 1 {
+        bail!(
+            "runtime executable must be an absolute path or bare name: '{}'",
+            executable
+        );
+    }
+    for prefix in search_paths {
+        if !prefix.is_absolute() {
+            continue;
+        }
+        if let Some(resolved) = resolve(&prefix.join(executable)) {
+            return Ok(resolved);
         }
     }
     bail!("unable to resolve executable '{}'", executable);
+}
+
+#[cfg(target_os = "linux")]
+struct ExternalSystemToolInstallation {
+    prefix: Option<PathBuf>,
+    executable_dir: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+fn external_system_tool_installation(
+    executable: &str,
+) -> Result<Option<ExternalSystemToolInstallation>> {
+    let invoked = PathBuf::from(resolve_host_runtime_executable(executable)?);
+    let resolved = canonical_path(&invoked)
+        .with_context(|| format!("failed to resolve executable '{}'", invoked.display()))?;
+    let executable_dir = resolved
+        .parent()
+        .ok_or_else(|| anyhow!("resolved executable has no parent: {}", resolved.display()))?;
+    if ["/usr/bin", "/bin"]
+        .iter()
+        .any(|root| executable_dir == Path::new(root))
+    {
+        return Ok(None);
+    }
+    let already_mounted = ["/usr", "/bin", "/lib", "/lib64", "/etc"]
+        .iter()
+        .any(|root| resolved.starts_with(root));
+    let prefix = match executable_dir.file_name().and_then(|name| name.to_str()) {
+        Some("bin" | "sbin") => executable_dir.parent().ok_or_else(|| {
+            anyhow!(
+                "resolved executable install directory has no parent: {}",
+                resolved.display()
+            )
+        })?,
+        _ => executable_dir,
+    };
+    if !already_mounted {
+        ensure_scoped_external_prefix(prefix, host_home_dir().as_deref(), executable)?;
+    }
+    Ok(Some(ExternalSystemToolInstallation {
+        prefix: (!already_mounted).then(|| prefix.to_path_buf()),
+        executable_dir: executable_dir.to_path_buf(),
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_scoped_external_prefix(
+    prefix: &Path,
+    home: Option<&Path>,
+    executable: &str,
+) -> Result<()> {
+    let normal_components = prefix
+        .components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .count();
+    let home = home.with_context(|| {
+        format!(
+            "cannot safely scope external executable '{}' without HOME",
+            executable
+        )
+    })?;
+    let home = fs::canonicalize(home).with_context(|| {
+        format!(
+            "cannot safely scope external executable '{}' because HOME '{}' is unavailable",
+            executable,
+            home.display()
+        )
+    })?;
+    let intersects_home = prefix.starts_with(&home) || home.starts_with(prefix);
+    if normal_components < 2 || intersects_home {
+        bail!(
+            "refusing to expose broad host prefix '{}' for resolved executable '{}'",
+            prefix.display(),
+            executable
+        );
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -3591,7 +3856,7 @@ fn validate_toolchain_input(toolchain_input: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn normalized_toolchain_inputs(values: &[String]) -> Vec<(PathBuf, String)> {
+fn normalized_toolchain_inputs(values: &[String]) -> Result<Vec<(PathBuf, String)>> {
     let mut output = Vec::new();
     let mut seen = BTreeSet::new();
     for value in values {
@@ -3599,8 +3864,18 @@ fn normalized_toolchain_inputs(values: &[String]) -> Vec<(PathBuf, String)> {
         if seen.insert(destination.clone()) {
             output.push((PathBuf::from(value), destination));
         }
+        let path = Path::new(value);
+        if path.symlink_metadata()?.file_type().is_symlink() {
+            let target = fs::canonicalize(path).with_context(|| {
+                format!("failed to resolve TOOLCHAIN_INPUT symlink '{}'", value)
+            })?;
+            let destination = target.display().to_string();
+            if seen.insert(destination.clone()) {
+                output.push((target, destination));
+            }
+        }
     }
-    output
+    Ok(output)
 }
 
 #[cfg(target_os = "linux")]
@@ -5721,6 +5996,133 @@ fn hash_file_sha256(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn validate_toolchain_input_for_identity(path: &Path) -> Result<()> {
+    if !path.is_absolute() {
+        bail!(
+            "TOOLCHAIN_INPUT '{}' must be an absolute host path",
+            path.display()
+        );
+    }
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("TOOLCHAIN_INPUT '{}' does not exist", path.display()))?;
+    let file_type = metadata.file_type();
+    if file_type.is_file() || file_type.is_dir() {
+        return Ok(());
+    }
+    if file_type.is_symlink() {
+        let target = fs::metadata(path).with_context(|| {
+            format!(
+                "failed to inspect TOOLCHAIN_INPUT symlink target '{}'",
+                path.display()
+            )
+        })?;
+        if target.is_file() || target.is_dir() {
+            return Ok(());
+        }
+    }
+    bail!(
+        "TOOLCHAIN_INPUT '{}' must identify a regular file or directory",
+        path.display()
+    )
+}
+
+fn update_identity_bytes(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn update_identity_field(hasher: &mut Sha256, name: &str, value: &[u8]) {
+    update_identity_bytes(hasher, name.as_bytes());
+    update_identity_bytes(hasher, value);
+}
+
+fn update_permission_identity(hasher: &mut Sha256, metadata: &fs::Metadata) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        update_identity_field(hasher, "mode", &metadata.permissions().mode().to_le_bytes());
+    }
+    #[cfg(not(unix))]
+    update_identity_field(
+        hasher,
+        "readonly",
+        &[u8::from(metadata.permissions().readonly())],
+    );
+}
+
+fn hash_toolchain_tree_entry(hasher: &mut Sha256, path: &Path, relative_path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).with_context(|| {
+        format!(
+            "failed to inspect TOOLCHAIN_INPUT entry '{}'",
+            path.display()
+        )
+    })?;
+    update_identity_field(hasher, "path", relative_path.as_os_str().as_encoded_bytes());
+    update_permission_identity(hasher, &metadata);
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        update_identity_field(hasher, "kind", b"symlink");
+        let target = fs::read_link(path).with_context(|| {
+            format!(
+                "failed to read TOOLCHAIN_INPUT symlink '{}'",
+                path.display()
+            )
+        })?;
+        update_identity_field(hasher, "target", target.as_os_str().as_encoded_bytes());
+        return Ok(());
+    }
+    if file_type.is_file() {
+        update_identity_field(hasher, "kind", b"file");
+        update_identity_field(hasher, "size", &metadata.len().to_le_bytes());
+        let mut file = fs::File::open(path)
+            .with_context(|| format!("failed to open TOOLCHAIN_INPUT file '{}'", path.display()))?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).with_context(|| {
+                format!("failed to hash TOOLCHAIN_INPUT file '{}'", path.display())
+            })?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        return Ok(());
+    }
+    if file_type.is_dir() {
+        update_identity_field(hasher, "kind", b"directory");
+        for entry in read_dir_sorted(path)? {
+            hash_toolchain_tree_entry(
+                hasher,
+                &entry.path(),
+                &relative_path.join(entry.file_name()),
+            )?;
+        }
+        return Ok(());
+    }
+    bail!(
+        "TOOLCHAIN_INPUT tree entry '{}' has an unsupported file type",
+        path.display()
+    )
+}
+
+fn hash_toolchain_input_tree(declared_path: &Path, resolved_path: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    update_identity_field(&mut hasher, "schema", b"depos-toolchain-tree-v1");
+    hash_toolchain_tree_entry(&mut hasher, declared_path, Path::new("."))?;
+    if fs::symlink_metadata(declared_path)?
+        .file_type()
+        .is_symlink()
+    {
+        update_identity_field(
+            &mut hasher,
+            "resolved_path",
+            resolved_path.as_os_str().as_encoded_bytes(),
+        );
+        hash_toolchain_tree_entry(&mut hasher, resolved_path, Path::new("@resolved"))?;
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn run_command<I, S>(
     log: &mut String,
     current_dir: Option<&Path>,
@@ -5870,23 +6272,59 @@ fn materialization_build_key(
     depofile_hash: &str,
     provenance: &SourceProvenance,
     dependency_keys: &[(String, String)],
+    target_platform: TargetPlatform,
+    engine: &MaterializationEngineIdentity,
+    toolchain_inputs: &[&ToolchainInputIdentity],
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(format!("depofile={depofile_hash}\n"));
-    hasher.update(format!(
-        "source_ref={}\n",
-        provenance.source_ref.as_deref().unwrap_or("")
-    ));
-    hasher.update(format!(
-        "source_commit={}\n",
-        provenance.source_commit.as_deref().unwrap_or("")
-    ));
-    hasher.update(format!(
-        "source_digest={}\n",
-        provenance.source_digest.as_deref().unwrap_or("")
-    ));
+    update_identity_field(&mut hasher, "schema", b"depos-materialization-v2");
+    update_identity_field(&mut hasher, "depofile", depofile_hash.as_bytes());
+    update_identity_field(
+        &mut hasher,
+        "target_platform",
+        target_platform.as_str().as_bytes(),
+    );
+    update_identity_field(
+        &mut hasher,
+        "source_ref",
+        provenance.source_ref.as_deref().unwrap_or("").as_bytes(),
+    );
+    update_identity_field(
+        &mut hasher,
+        "source_commit",
+        provenance.source_commit.as_deref().unwrap_or("").as_bytes(),
+    );
+    update_identity_field(
+        &mut hasher,
+        "source_digest",
+        provenance.source_digest.as_deref().unwrap_or("").as_bytes(),
+    );
     for (package_id, key) in dependency_keys {
-        hasher.update(format!("dependency={package_id}:{key}\n"));
+        update_identity_field(&mut hasher, "dependency_package", package_id.as_bytes());
+        update_identity_field(&mut hasher, "dependency_key", key.as_bytes());
+    }
+    update_identity_field(
+        &mut hasher,
+        "engine_path",
+        engine.path.as_os_str().as_encoded_bytes(),
+    );
+    update_identity_field(&mut hasher, "engine_sha256", engine.sha256.as_bytes());
+    for input in toolchain_inputs {
+        update_identity_field(
+            &mut hasher,
+            "toolchain_declared_path",
+            input.declared_path.as_bytes(),
+        );
+        update_identity_field(
+            &mut hasher,
+            "toolchain_resolved_path",
+            input.resolved_path.as_os_str().as_encoded_bytes(),
+        );
+        update_identity_field(
+            &mut hasher,
+            "toolchain_tree_sha256",
+            input.tree_sha256.as_bytes(),
+        );
     }
     format!("{:x}", hasher.finalize())
 }
@@ -10566,6 +11004,195 @@ fn prune_empty_ancestors(path: &Path, stop_at: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod runtime_executable_tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn preserves_path_selected_executable_symlink_semantics() {
+        let temp = tempfile::tempdir().expect("create executable fixture root");
+        let real_dir = temp.path().join("real");
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&real_dir).expect("create real executable directory");
+        fs::create_dir_all(&bin_dir).expect("create path directory");
+        let real = real_dir.join("compiler-driver");
+        let mut file = fs::File::create(&real).expect("create executable fixture");
+        file.write_all(b"#!/bin/sh\ncase \"$0\" in */c++) exit 0 ;; *) exit 97 ;; esac\n")
+            .expect("write executable fixture");
+        let mut permissions = file
+            .metadata()
+            .expect("read executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        drop(file);
+        fs::set_permissions(&real, permissions).expect("mark fixture executable");
+        let invoked = bin_dir.join("c++");
+        symlink(&real, &invoked).expect("create executable symlink");
+
+        let resolved = resolve_runtime_executable_from_paths("c++", &[bin_dir])
+            .expect("resolve PATH-selected executable");
+        assert_eq!(resolved, invoked.display().to_string());
+        assert!(Command::new(resolved)
+            .status()
+            .expect("execute selected symlink")
+            .success());
+    }
+
+    #[test]
+    fn rejects_non_executable_and_relative_path_entries() {
+        let temp = tempfile::tempdir().expect("create non-executable fixture root");
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("create fixture directory");
+        fs::write(bin_dir.join("cmake"), b"not executable\n")
+            .expect("write non-executable fixture");
+
+        assert!(resolve_runtime_executable_from_paths("cmake", &[bin_dir]).is_err());
+        assert!(
+            resolve_runtime_executable_from_paths("cmake", &[PathBuf::from("relative-bin")],)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn mounts_the_real_target_of_a_toolchain_input_symlink() {
+        let temp = tempfile::tempdir().expect("create toolchain symlink fixture root");
+        let real_file = temp.path().join("bash");
+        let file_link = temp.path().join("sh");
+        let real_directory = temp.path().join("llvm-22");
+        let directory_link = temp.path().join("llvm-current");
+        fs::write(&real_file, b"shell fixture\n").expect("write toolchain target");
+        fs::create_dir(&real_directory).expect("create toolchain directory target");
+        symlink(&real_file, &file_link).expect("create toolchain file symlink");
+        symlink(&real_directory, &directory_link).expect("create toolchain directory symlink");
+
+        let mounts = normalized_toolchain_inputs(&[
+            file_link.display().to_string(),
+            directory_link.display().to_string(),
+        ])
+        .expect("normalize toolchain symlink inputs");
+        assert_eq!(
+            mounts,
+            vec![
+                (file_link.clone(), file_link.display().to_string()),
+                (real_file.clone(), real_file.display().to_string()),
+                (directory_link.clone(), directory_link.display().to_string()),
+                (real_directory.clone(), real_directory.display().to_string()),
+            ]
+        );
+    }
+    #[test]
+    fn rejects_broad_and_home_overlapping_external_tool_prefixes() {
+        let temp = tempfile::tempdir().expect("create external tool fixture root");
+        let home = temp.path().join("users/victor");
+        let home_scoped = home.join(".local");
+        let external_scoped = temp.path().join("opt/cmake");
+        fs::create_dir_all(&home_scoped).expect("create home tool prefix");
+        fs::create_dir_all(&external_scoped).expect("create external tool prefix");
+
+        assert!(ensure_scoped_external_prefix(&home, Some(&home), "cmake").is_err());
+        assert!(ensure_scoped_external_prefix(temp.path(), Some(&home), "cmake").is_err());
+        assert!(ensure_scoped_external_prefix(&home_scoped, Some(&home), "cmake").is_err());
+        assert!(ensure_scoped_external_prefix(&external_scoped, None, "cmake").is_err());
+        assert!(ensure_scoped_external_prefix(
+            &external_scoped,
+            Some(&temp.path().join("missing-home")),
+            "cmake",
+        )
+        .is_err());
+        for broad in ["/tmp", "/opt", "/work"] {
+            assert!(ensure_scoped_external_prefix(Path::new(broad), None, "cmake").is_err());
+        }
+        ensure_scoped_external_prefix(&external_scoped, Some(&home), "cmake")
+            .expect("accept dedicated external tool prefix");
+    }
+}
+
+#[cfg(test)]
+mod materialization_identity_tests {
+    use super::*;
+
+    fn build_key(
+        engine: &MaterializationEngineIdentity,
+        toolchain_inputs: &[&ToolchainInputIdentity],
+    ) -> String {
+        materialization_build_key(
+            "depofile",
+            &SourceProvenance::default(),
+            &[],
+            TargetPlatform::Host,
+            engine,
+            toolchain_inputs,
+        )
+    }
+
+    #[test]
+    fn same_path_engine_replacement_changes_materialization_key() {
+        let temp = tempfile::tempdir().expect("create engine fixture root");
+        let engine_path = temp.path().join("depos");
+        fs::write(&engine_path, b"engine-one").expect("write first engine");
+        let first = materialization_engine_identity(&engine_path).expect("identify first engine");
+        let first_key = build_key(&first, &[]);
+
+        fs::write(&engine_path, b"engine-two").expect("replace engine at the same path");
+        let second = materialization_engine_identity(&engine_path).expect("identify second engine");
+        let second_key = build_key(&second, &[]);
+
+        assert_eq!(first.path, second.path);
+        assert_ne!(first.sha256, second.sha256);
+        assert_ne!(first_key, second_key);
+    }
+
+    #[test]
+    fn same_path_toolchain_tree_change_changes_materialization_key() {
+        let temp = tempfile::tempdir().expect("create toolchain fixture root");
+        let engine_path = temp.path().join("depos");
+        let toolchain_path = temp.path().join("toolchain");
+        let compiler_path = toolchain_path.join("bin/clang");
+        fs::create_dir_all(compiler_path.parent().unwrap()).expect("create toolchain tree");
+        fs::write(&engine_path, b"stable-engine").expect("write engine");
+        fs::write(&compiler_path, b"compiler-one").expect("write first compiler");
+        let engine = materialization_engine_identity(&engine_path).expect("identify engine");
+        let first =
+            toolchain_input_identity(&toolchain_path).expect("identify first toolchain tree");
+        let first_key = build_key(&engine, &[&first]);
+
+        fs::write(&compiler_path, b"compiler-two")
+            .expect("replace compiler at the same toolchain path");
+        let second =
+            toolchain_input_identity(&toolchain_path).expect("identify second toolchain tree");
+        let second_key = build_key(&engine, &[&second]);
+
+        assert_eq!(first.declared_path, second.declared_path);
+        assert_eq!(first.resolved_path, second.resolved_path);
+        assert_ne!(first.tree_sha256, second.tree_sha256);
+        assert_ne!(first_key, second_key);
+    }
+
+    #[test]
+    fn toolchain_path_identity_changes_materialization_key() {
+        let temp = tempfile::tempdir().expect("create toolchain identity fixture root");
+        let engine_path = temp.path().join("depos");
+        let first_path = temp.path().join("first/clang");
+        let second_path = temp.path().join("second/clang");
+        fs::create_dir_all(first_path.parent().unwrap()).expect("create first toolchain root");
+        fs::create_dir_all(second_path.parent().unwrap()).expect("create second toolchain root");
+        fs::write(&engine_path, b"stable-engine").expect("write engine");
+        fs::write(&first_path, b"same-compiler").expect("write first toolchain");
+        fs::write(&second_path, b"same-compiler").expect("write second toolchain");
+        let engine = materialization_engine_identity(&engine_path).expect("identify engine");
+        let first = toolchain_input_identity(&first_path).expect("identify first toolchain");
+        let second = toolchain_input_identity(&second_path).expect("identify second toolchain");
+
+        assert_eq!(first.tree_sha256, second.tree_sha256);
+        assert_ne!(
+            build_key(&engine, &[&first]),
+            build_key(&engine, &[&second])
+        );
+    }
+}
+
 #[cfg(test)]
 mod metadata_safety_tests {
     use super::*;
@@ -10776,7 +11403,7 @@ mod target_platform_tests {
     }
 
     #[test]
-    fn target_platform_separates_variants() {
+    fn target_platform_separates_variants_and_materialization_keys() {
         assert_eq!(
             variant_for_target("aarch64", TargetPlatform::Host).unwrap(),
             "aarch64-aarch64_v1"
@@ -10789,6 +11416,29 @@ mod target_platform_tests {
             variant_for_target("aarch64", TargetPlatform::IosSimulator).unwrap(),
             "aarch64-aarch64-ios-simulator_v1"
         );
+
+        let provenance = SourceProvenance::default();
+        let engine = MaterializationEngineIdentity {
+            path: PathBuf::from("/depos"),
+            sha256: "engine".to_string(),
+        };
+        let host_key = materialization_build_key(
+            "depofile",
+            &provenance,
+            &[],
+            TargetPlatform::Host,
+            &engine,
+            &[],
+        );
+        let ios_key = materialization_build_key(
+            "depofile",
+            &provenance,
+            &[],
+            TargetPlatform::Ios,
+            &engine,
+            &[],
+        );
+        assert_ne!(host_key, ios_key);
 
         assert_eq!(
             variant_for_selected_packages(&[], TargetPlatform::Ios).unwrap(),

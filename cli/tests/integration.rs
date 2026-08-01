@@ -4175,20 +4175,31 @@ fn nproc_string() -> String {
 }
 
 fn scratch_toolchain_lines() -> String {
-    let mut lines = Vec::new();
-    for path in [
-        "/bin/sh",
-        "/usr/bin/sh",
-        "/usr/bin/install",
-        "/usr/lib",
-        "/lib",
-        "/lib64",
-    ] {
-        if Path::new(path).exists() {
-            lines.push(format!("TOOLCHAIN_INPUT {}", path));
+    let mut paths = BTreeSet::new();
+    for executable in ["/bin/sh", "/usr/bin/install"] {
+        if !Path::new(executable).exists() {
+            continue;
+        }
+        paths.insert(executable.to_string());
+        let output = Command::new("ldd")
+            .arg(executable)
+            .output()
+            .unwrap_or_else(|error| panic!("ldd {executable} failed: {error}"));
+        assert!(output.status.success(), "ldd {executable} failed");
+        for token in String::from_utf8(output.stdout)
+            .expect("utf-8 ldd output")
+            .split_ascii_whitespace()
+        {
+            if token.starts_with('/') && Path::new(token).exists() {
+                paths.insert(token.to_string());
+            }
         }
     }
-    lines.join("\n")
+    paths
+        .into_iter()
+        .map(|path| format!("TOOLCHAIN_INPUT {path}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn foreign_arch() -> &'static str {
