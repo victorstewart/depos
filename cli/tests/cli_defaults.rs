@@ -5,6 +5,24 @@ use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
+fn version_reports_the_exact_package_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_depos"))
+        .arg("--version")
+        .output()
+        .expect("failed to run depos --version");
+
+    assert!(
+        output.status.success(),
+        "version failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("depos {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
 fn status_defaults_depos_root_to_home_dot_depos_and_creates_it() {
     let temp_home = TempDir::new().expect("failed to create temp home");
     let default_root = temp_home.path().join(".depos");

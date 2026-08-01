@@ -16,7 +16,7 @@ use metalor::{run_isolated_container_command, BindMount, ContainerRunCommand};
 use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Parser, Debug)]
-#[command(name = "depos")]
+#[command(name = "depos", version)]
 #[command(about = "Shared dependency workspace CLI", long_about = None)]
 struct Cli {
     #[command(subcommand)]
