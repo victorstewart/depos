@@ -2393,9 +2393,21 @@ fn copy_host_staged_directory_contents(
             log,
         )?;
     }
+    restore_host_staged_modified_time(destination, &metadata)?;
     fs::set_permissions(destination, metadata.permissions())
         .with_context(|| format!("failed to set permissions on {}", destination.display()))?;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn restore_host_staged_modified_time(destination: &Path, metadata: &fs::Metadata) -> Result<()> {
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("failed to read modification time for {}", destination.display()))?;
+    fs::File::open(destination)
+        .with_context(|| format!("failed to open {} to restore modification time", destination.display()))?
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .with_context(|| format!("failed to restore modification time for {}", destination.display()))
 }
 
 #[cfg(target_os = "linux")]
@@ -2439,9 +2451,68 @@ fn copy_host_staged_path(
             destination.display()
         )
     })?;
+    restore_host_staged_modified_time(destination, &metadata)?;
     fs::set_permissions(destination, metadata.permissions())
         .with_context(|| format!("failed to set permissions on {}", destination.display()))?;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod host_staged_snapshot_tests {
+    use super::*;
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
+
+    fn set_modified(path: &Path, modified: SystemTime) {
+        fs::File::open(path)
+            .expect("open fixture to set modification time")
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .expect("set fixture modification time");
+    }
+
+    fn modified(path: &Path) -> SystemTime {
+        fs::metadata(path)
+            .expect("read fixture metadata")
+            .modified()
+            .expect("read fixture modification time")
+    }
+
+    #[test]
+    fn host_staged_snapshot_preserves_generated_autotools_mtime_order() {
+        let temp = tempfile::tempdir().expect("create fixture root");
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        let m4 = source.join("m4");
+        let configure = source.join("configure.ac");
+        let generated = source.join("aclocal.m4");
+        let macro_input = m4.join("project.m4");
+        fs::create_dir_all(&m4).expect("create source fixture");
+        fs::write(&configure, b"AC_INIT([fixture], [1])\n").expect("write configure input");
+        fs::write(&generated, b"generated aclocal output\n").expect("write generated output");
+        fs::write(&macro_input, b"AC_DEFUN([FIXTURE], [])\n").expect("write macro input");
+
+        let input_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let generated_time = input_time + Duration::from_secs(1);
+        set_modified(&configure, input_time);
+        set_modified(&macro_input, input_time);
+        set_modified(&generated, generated_time);
+        set_modified(&m4, input_time);
+        set_modified(&source, input_time);
+
+        copy_host_staged_directory_contents(&source, &destination, &source, &mut String::new())
+            .expect("copy host-staged source snapshot");
+
+        assert_eq!(modified(&destination.join("configure.ac")), input_time);
+        assert_eq!(modified(&destination.join("m4/project.m4")), input_time);
+        assert_eq!(modified(&destination.join("aclocal.m4")), generated_time);
+        assert_eq!(modified(&destination.join("m4")), input_time);
+        assert_eq!(modified(&destination), input_time);
+        assert!(
+            modified(&destination.join("aclocal.m4"))
+                > modified(&destination.join("configure.ac")),
+            "the shipped generated file must remain newer than its Autotools inputs"
+        );
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
