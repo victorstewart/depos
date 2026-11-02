@@ -303,6 +303,55 @@ pub enum FetchSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceVariant {
+    os: String,
+    build_arch: String,
+    url: String,
+    sha256: String,
+}
+
+fn normalize_source_variant_os(value: &str) -> Result<String> {
+    match value {
+        "linux" | "macos" | "windows" => Ok(value.to_string()),
+        _ => bail!("unsupported SOURCE_VARIANT OS '{value}'; expected linux, macos, or windows"),
+    }
+}
+
+fn host_build_os() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "linux"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }
+}
+
+fn select_source_variant(
+    variants: &[SourceVariant],
+    os: &str,
+    build_arch: &str,
+) -> Result<FetchSpec> {
+    variants
+        .iter()
+        .find(|variant| variant.os == os && variant.build_arch == build_arch)
+        .map(|variant| FetchSpec::Url {
+            url: variant.url.clone(),
+            sha256: Some(variant.sha256.clone()),
+        })
+        .with_context(|| {
+            format!(
+                "SOURCE_VARIANT has no entry for build OS '{os}' and architecture '{build_arch}'"
+            )
+        })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BuildRoot {
     System,
     Scratch,
@@ -1709,7 +1758,7 @@ fn render_linux_namespace_probe_command(disable_network: bool) -> String {
     parts.join(" ")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn rootless_runtime_failure_allows_system_fallback(error: &str, execution_log: &str) -> bool {
     let combined = format!("{error}\n{execution_log}").to_ascii_lowercase();
     let namespace_failure = combined.contains("bind mount ")
@@ -1722,7 +1771,33 @@ fn rootless_runtime_failure_allows_system_fallback(error: &str, execution_log: &
     let permission_failure = combined.contains("operation not permitted")
         || combined.contains("permission denied")
         || combined.contains("not permitted");
-    namespace_failure && permission_failure
+    // This function is reached only for the auto-selected rootless backend and
+    // only BUILD_ROOT SYSTEM may use the host-staged fallback.  Linux reports
+    // virtiofs/overlay incompatibility as a generic mount EINVAL, so the
+    // observable contract is the namespace-mount marker plus "wrong fs type".
+    let unsupported_namespace_filesystem = combined.contains("wrong fs type");
+    namespace_failure && (permission_failure || unsupported_namespace_filesystem)
+}
+
+#[cfg(test)]
+mod linux_isolation_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn rootless_virtiofs_overlay_mount_failure_allows_system_fallback() {
+        assert!(rootless_runtime_failure_allows_system_fallback(
+            "bind mount /etc to /runtime/root/etc failed: wrong fs type, bad option, bad superblock",
+            "isolated command failed with status 1",
+        ));
+    }
+
+    #[test]
+    fn unrelated_wrong_filesystem_type_does_not_allow_system_fallback() {
+        assert!(!rootless_runtime_failure_allows_system_fallback(
+            "archive extraction failed: wrong fs type",
+            "source preparation did not enter a Linux namespace",
+        ));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -7243,6 +7318,7 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
     let mut pending_target_features = BTreeMap::<String, Vec<String>>::new();
     let mut depends = Vec::new();
     let mut fetch: Option<FetchSpec> = None;
+    let mut source_variants = Vec::<SourceVariant>::new();
     let mut configure = Vec::new();
     let mut build = Vec::new();
     let mut install = Vec::new();
@@ -7333,6 +7409,13 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
                 system_libs = PackageSystemLibs::parse(&value)?;
             }
             "SOURCE" => {
+                if !source_variants.is_empty() {
+                    bail!(
+                        "{}:{}: SOURCE cannot be combined with SOURCE_VARIANT",
+                        path.display(),
+                        line_number
+                    );
+                }
                 let parts = tokenize_arguments(remainder)?;
                 match parts.as_slice() {
                     [kind, url] if kind == "URL" => {
@@ -7359,6 +7442,60 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
                         line_number
                     ),
                 }
+            }
+            "SOURCE_VARIANT" => {
+                if fetch.is_some() {
+                    bail!(
+                        "{}:{}: SOURCE_VARIANT cannot be combined with SOURCE",
+                        path.display(),
+                        line_number
+                    );
+                }
+                let parts = tokenize_arguments(remainder)?;
+                let [os, build_arch, url_keyword, url, sha_keyword, sha256] = parts.as_slice()
+                else {
+                    bail!(
+                        "{}:{}: SOURCE_VARIANT requires '<os> <build_arch> URL <url> SHA256 <sha256>'",
+                        path.display(),
+                        line_number
+                    );
+                };
+                if url_keyword != "URL" || sha_keyword != "SHA256" {
+                    bail!(
+                        "{}:{}: SOURCE_VARIANT requires '<os> <build_arch> URL <url> SHA256 <sha256>'",
+                        path.display(),
+                        line_number
+                    );
+                }
+                let os = normalize_source_variant_os(os)
+                    .with_context(|| format!("{}:{}", path.display(), line_number))?;
+                let build_arch = normalize_arch_name(build_arch)
+                    .with_context(|| format!("{}:{}", path.display(), line_number))?;
+                if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    bail!(
+                        "{}:{}: SOURCE_VARIANT SHA256 must be a 64-character hex digest",
+                        path.display(),
+                        line_number
+                    );
+                }
+                if source_variants
+                    .iter()
+                    .any(|variant| variant.os == os && variant.build_arch == build_arch)
+                {
+                    bail!(
+                        "{}:{}: SOURCE_VARIANT is already set for OS '{}' and build architecture '{}'",
+                        path.display(),
+                        line_number,
+                        os,
+                        build_arch
+                    );
+                }
+                source_variants.push(SourceVariant {
+                    os,
+                    build_arch,
+                    url: url.clone(),
+                    sha256: sha256.clone(),
+                });
             }
             "ARTIFACT" => {
                 artifacts.push(PathBuf::from(expect_single_token(
@@ -8249,6 +8386,17 @@ pub fn parse_depofile(path: &Path) -> Result<PackageSpec> {
         bail!(
             "DepoFile {} must declare at least one TARGET or ARTIFACT",
             path.display()
+        );
+    }
+
+    if !source_variants.is_empty() {
+        let build_os = match &build_root {
+            BuildRoot::Oci(_) => "linux",
+            BuildRoot::System | BuildRoot::Scratch => host_build_os(),
+        };
+        fetch = Some(
+            select_source_variant(&source_variants, build_os, &build_arch)
+                .with_context(|| format!("{}: package source selection", path.display()))?,
         );
     }
 
@@ -11424,6 +11572,127 @@ mod metadata_safety_tests {
         fs::create_dir_all(&outside).expect("create outside root");
         assert!(prune_empty_ancestors(&outside, &stop).is_err());
         assert!(outside.exists());
+    }
+}
+
+#[cfg(test)]
+mod source_variant_tests {
+    use super::*;
+
+    fn variants() -> Vec<SourceVariant> {
+        ["linux", "macos"]
+            .into_iter()
+            .flat_map(|os| {
+                ["x86_64", "aarch64"]
+                    .into_iter()
+                    .map(move |build_arch| SourceVariant {
+                        os: os.to_string(),
+                        build_arch: build_arch.to_string(),
+                        url: format!("https://example.test/{os}-{build_arch}.tar.xz"),
+                        sha256: "a".repeat(64),
+                    })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn source_variants_select_each_supported_host() {
+        let variants = variants();
+        for (os, arch) in [
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+            ("macos", "x86_64"),
+            ("macos", "aarch64"),
+        ] {
+            assert_eq!(
+                select_source_variant(&variants, os, arch).unwrap(),
+                FetchSpec::Url {
+                    url: format!("https://example.test/{os}-{arch}.tar.xz"),
+                    sha256: Some("a".repeat(64)),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn source_variants_reject_missing_duplicate_and_mixed_sources() {
+        assert!(select_source_variant(&variants(), "linux", "riscv64").is_err());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("variant.DepoFile");
+        fs::write(
+            &path,
+            "NAME x\nVERSION 1\nSOURCE_VARIANT linux x86_64 URL https://x SHA256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nSOURCE_VARIANT linux amd64 URL https://y SHA256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nARTIFACT bin/x\n",
+        )
+        .unwrap();
+        assert!(parse_depofile(&path).is_err());
+        fs::write(
+            &path,
+            "NAME x\nVERSION 1\nSOURCE URL https://x\nSOURCE_VARIANT linux x86_64 URL https://y SHA256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nARTIFACT bin/x\n",
+        )
+        .unwrap();
+        assert!(parse_depofile(&path).is_err());
+        fs::write(
+            &path,
+            "NAME x\nVERSION 1\nSOURCE_VARIANT linux x86_64 URL https://x SHA256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nSOURCE URL https://y\nARTIFACT bin/x\n",
+        )
+        .unwrap();
+        assert!(parse_depofile(&path).is_err());
+        fs::write(
+            &path,
+            "NAME x\nVERSION 1\nSOURCE_VARIANT linux x86_64 URL https://x SHA256 invalid\nARTIFACT bin/x\n",
+        )
+        .unwrap();
+        assert!(parse_depofile(&path).is_err());
+    }
+
+    #[test]
+    fn source_variants_select_linux_for_oci_after_late_build_arch() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("variant.DepoFile");
+        fs::write(
+            &path,
+            "NAME x\nVERSION 1\nSOURCE_VARIANT linux x86_64 URL https://linux SHA256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nSOURCE_VARIANT macos x86_64 URL https://macos SHA256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nBUILD_ROOT OCI docker://example.invalid/toolchain@sha256:00\nBUILD_ARCH x86_64\nTOOLCHAIN ROOTFS\nARTIFACT bin/x\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_depofile(&path).unwrap().fetch,
+            Some(FetchSpec::Url {
+                url: "https://linux".to_string(),
+                sha256: Some("a".repeat(64)),
+            })
+        );
+    }
+
+    #[test]
+    fn source_variants_preserve_selected_sha_and_plain_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("variant.DepoFile");
+        let variant = format!(
+            "NAME x\nVERSION 1\nSOURCE_VARIANT {} {} URL https://x SHA256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nARTIFACT bin/x\n",
+            host_build_os(),
+            host_arch()
+        );
+        fs::write(&path, variant).unwrap();
+        let spec = parse_depofile(&path).unwrap();
+        assert_eq!(
+            spec.fetch,
+            Some(FetchSpec::Url {
+                url: "https://x".to_string(),
+                sha256: Some("a".repeat(64)),
+            })
+        );
+        fs::write(
+            &path,
+            "NAME x\nVERSION 1\nSOURCE URL https://x\nSHA256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nARTIFACT bin/x\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_depofile(&path).unwrap().fetch,
+            Some(FetchSpec::Url {
+                url: "https://x".to_string(),
+                sha256: Some("a".repeat(64)),
+            })
+        );
     }
 }
 

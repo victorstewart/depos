@@ -19,6 +19,7 @@ That is enough for a header-only dependency: name, version, source, and exported
 - `VERSION <version>`: package version label
 - `SOURCE GIT <url> <ref>`: Git source with branch, tag, or commit reference
 - `SOURCE URL <url>`: tar or ZIP archive source; tar extraction strips one component, while ZIP extraction strips one shared wrapper directory and otherwise preserves relative paths
+- `SOURCE_VARIANT <os> <build_arch> URL <url> SHA256 <sha256>`: select one pinned URL source for the effective build OS/architecture (`linux`, `macos`, or `windows`); variants cannot be mixed with `SOURCE`
 - `SOURCE_SUBDIR <path>`: build from a subdirectory inside the fetched source tree
 - `DEPENDS <name> VERSION <version>`: consume another package
 

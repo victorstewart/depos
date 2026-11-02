@@ -5,10 +5,10 @@
 ## Install
 
 ```bash
-cargo install depos --version 0.5.4
+cargo install depos --version 0.5.5
 ```
 
-If you are using `.depos.cmake`, you can also let it bootstrap `depos 0.5.4` locally on first use instead of preinstalling it.
+If you are using `.depos.cmake`, you can also let it bootstrap `depos 0.5.5` locally on first use instead of preinstalling it.
 
 ## Core Commands
 
