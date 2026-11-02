@@ -483,6 +483,11 @@ function(_depos_probe_runtime out_valid out_reason executable)
     set(${out_reason} "command '${executable} --version' returned '${_depos_probe_result}'; stderr='${_depos_probe_stderr}'" PARENT_SCOPE)
     return()
   endif()
+  if (NOT "${_depos_probe_stdout}" MATCHES "^depos [0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$")
+    set(${out_valid} FALSE PARENT_SCOPE)
+    set(${out_reason} "command '${executable} --version' did not report a Depos semantic version: '${_depos_probe_stdout}'" PARENT_SCOPE)
+    return()
+  endif()
   set(${out_valid} TRUE PARENT_SCOPE)
   set(${out_reason} "" PARENT_SCOPE)
 endfunction()
@@ -540,6 +545,7 @@ function(_depos_bootstrap_with_cargo out_var)
       ${_depos_cargo_command}
       install
       --locked
+      --force
       --root
       "${_depos_bootstrap_tool_root}"
       --version

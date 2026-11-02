@@ -250,7 +250,9 @@ exec "]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[" "$@"
   set(DEPOS_SMOKE_STALE_RUNTIME_BINARY "${DEPOS_SMOKE_STALE_RUNTIME_BOOTSTRAP_DIR}/.tool/${DEPOS_TEST_HOST_RUNTIME}/bin/depos${CMAKE_EXECUTABLE_SUFFIX}")
   get_filename_component(DEPOS_SMOKE_STALE_RUNTIME_BINARY_PARENT "${DEPOS_SMOKE_STALE_RUNTIME_BINARY}" DIRECTORY)
   file(MAKE_DIRECTORY "${DEPOS_SMOKE_STALE_RUNTIME_BINARY_PARENT}")
-  file(WRITE "${DEPOS_SMOKE_STALE_RUNTIME_BINARY}" "not a host executable\n")
+  # A runnable non-Depos executable is the dangerous case: checking only the
+  # path or exit status would accept it as the dependency authority.
+  file(COPY_FILE "${CMAKE_COMMAND}" "${DEPOS_SMOKE_STALE_RUNTIME_BINARY}")
   add_test(
     NAME depos-cmake-stale-local-runtime-is-rebuilt
     COMMAND
@@ -271,9 +273,9 @@ exec "]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[" "$@"
   )
 
   set(DEPOS_SMOKE_STALE_EXPLICIT_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/smoke-stale-explicit")
-  set(DEPOS_SMOKE_STALE_EXPLICIT_BINARY "${DEPOS_SMOKE_STALE_EXPLICIT_BINARY_DIR}/depos")
+  set(DEPOS_SMOKE_STALE_EXPLICIT_BINARY "${DEPOS_SMOKE_STALE_EXPLICIT_BINARY_DIR}/depos${CMAKE_EXECUTABLE_SUFFIX}")
   file(MAKE_DIRECTORY "${DEPOS_SMOKE_STALE_EXPLICIT_BINARY_DIR}")
-  file(WRITE "${DEPOS_SMOKE_STALE_EXPLICIT_BINARY}" "not a depos executable\n")
+  file(COPY_FILE "${CMAKE_COMMAND}" "${DEPOS_SMOKE_STALE_EXPLICIT_BINARY}")
   add_test(
     NAME depos-cmake-stale-explicit-runtime-is-rejected
     COMMAND
