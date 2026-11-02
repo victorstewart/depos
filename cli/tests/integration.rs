@@ -2640,6 +2640,60 @@ fn sync_materializes_command_driven_package_into_fresh_root() {
 }
 
 #[test]
+#[ignore = "requires a Linux guest with a FUSE/virtiofs mount; run tools/verify-rootless-fuse-fallback.sh"]
+fn rootless_fuse_mount_system_build_falls_back() {
+    let sandbox = Sandbox::new();
+    let upstream = sandbox.create_git_repo(
+        "upstreams/fuse_fallback_probe",
+        &[("payload/probe.h", "// rootless fallback probe\n")],
+    );
+    sandbox.write(
+        "depofiles/local/fuse_fallback_probe/release/1.0.0/main.DepoFile",
+        &format!(
+            "NAME fuse_fallback_probe\nVERSION 1.0.0\nSYSTEM_LIBS NEVER\nTARGET fuse_fallback_probe::fuse_fallback_probe INTERFACE include\nSOURCE GIT {} HEAD\nBUILD_SYSTEM MANUAL\nMANUAL_INSTALL_SH <<'EOF'\nmkdir -p \"${{DEPO_PREFIX}}/include/fuse_fallback_probe\" && cp \"${{DEPO_SOURCE_DIR}}/payload/probe.h\" \"${{DEPO_PREFIX}}/include/fuse_fallback_probe/probe.h\"\nEOF\n",
+            upstream.display()
+        ),
+    );
+    sandbox.write(
+        "manifests/fuse_fallback_probe.cmake",
+        "depos_require(fuse_fallback_probe VERSION 1.0.0)\n",
+    );
+
+    sync_registry(&SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox
+            .depos_root()
+            .join("manifests/fuse_fallback_probe.cmake"),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    })
+    .expect("SYSTEM package should survive the rootless FUSE bind-mount failure");
+
+    assert!(sandbox
+        .package_store_path(
+            "fuse_fallback_probe",
+            RELEASE_NAMESPACE,
+            "1.0.0",
+            "include/fuse_fallback_probe/probe.h"
+        )
+        .exists());
+    let log = fs::read_to_string(sandbox.package_log_path(
+        "fuse_fallback_probe",
+        RELEASE_NAMESPACE,
+        "1.0.0",
+    ))
+    .expect("read rootless fallback log");
+    assert!(
+        log.contains("using rootless Linux namespace backend"),
+        "{log}"
+    );
+    assert!(log.contains("wrong fs type"), "{log}");
+    assert!(
+        log.contains("falling back to host-staged BUILD_ROOT SYSTEM backend"),
+        "{log}"
+    );
+}
+
+#[test]
 fn cli_sync_materializes_system_package_with_host_isolation_override() {
     let sandbox = Sandbox::new();
     let upstream = sandbox.create_git_repo(
