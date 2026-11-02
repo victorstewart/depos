@@ -5,7 +5,7 @@
 Install it directly with:
 
 ```bash
-cargo install depos --version 0.5.4
+cargo install depos --version 0.5.5
 ```
 
 Use the CLI when you want to register recipes, sync manifests, or inspect repository state outside of the CMake helper flow.

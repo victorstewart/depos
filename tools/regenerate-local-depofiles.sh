@@ -7,6 +7,14 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 local_root="${LOCAL_ROOT:-$repo_root/depofiles/local}"
 check_only=0
+schema_snapshot=""
+
+cleanup() {
+  if [[ -n "$schema_snapshot" ]]; then
+    rm -rf "$schema_snapshot"
+  fi
+}
+trap cleanup EXIT
 
 if [[ -n "${SCHEMA_ROOT:-}" ]]; then
   schema_root="$SCHEMA_ROOT"
@@ -36,6 +44,23 @@ if [[ -z "$schema_root" || ! -d "$schema_root" ]]; then
       "nametag" "parsecheck" "$local_root" >&2
     exit 1
   fi
+
+  # Regeneration replaces each namespace tree. Snapshot the selected source
+  # namespace first so that the loop never deletes files which a streaming
+  # find still intends to read.
+  schema_snapshot="$(mktemp -d "${TMPDIR:-/tmp}/depos-local-schemas.XXXXXX")"
+  while IFS= read -r -d '' schema_file; do
+    name="$(awk '$1 == "NAME" { print $2; exit }' "$schema_file")"
+    version="$(awk '$1 == "VERSION" { print $2; exit }' "$schema_file")"
+    if [[ -z "$name" || -z "$version" ]]; then
+      printf 'failed to extract NAME/VERSION from %s\n' "$schema_file" >&2
+      exit 1
+    fi
+    snapshot_file="$schema_snapshot/$name/$version/main.DepoFile"
+    mkdir -p "$(dirname -- "$snapshot_file")"
+    cp "$schema_file" "$snapshot_file"
+  done < <(find "$local_root" -path "*/$source_namespace/*/main.DepoFile" -print0)
+  schema_root="$schema_snapshot"
 fi
 
 status=0
@@ -63,11 +88,7 @@ while IFS= read -r schema_file; do
     cp "$schema_file" "$destination"
   done
 done < <(
-  if [[ -n "$schema_root" && -d "$schema_root" ]]; then
-    find "$schema_root" -mindepth 2 -maxdepth 2 -name 'main.DepoFile' | sort
-  else
-    find "$local_root" -path "*/$source_namespace/*/main.DepoFile" | sort
-  fi
+  find "$schema_root" -type f -name 'main.DepoFile' | sort
 )
 
 exit "$status"
