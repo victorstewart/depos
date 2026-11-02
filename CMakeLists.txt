@@ -237,6 +237,60 @@ exec "]=] "${DEPOS_CLI_OUTPUT_BINARY}" [=[" "$@"
   )
   set_tests_properties(depos-cmake-bootstrap-run PROPERTIES DEPENDS depos-cmake-bootstrap-build)
 
+  string(TOLOWER "${CMAKE_HOST_SYSTEM_NAME}" DEPOS_TEST_HOST_SYSTEM)
+  string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" DEPOS_TEST_HOST_PROCESSOR)
+  if (DEPOS_TEST_HOST_PROCESSOR STREQUAL "arm64")
+    set(DEPOS_TEST_HOST_PROCESSOR "aarch64")
+  elseif (DEPOS_TEST_HOST_PROCESSOR STREQUAL "amd64" OR DEPOS_TEST_HOST_PROCESSOR STREQUAL "x64")
+    set(DEPOS_TEST_HOST_PROCESSOR "x86_64")
+  endif()
+  set(DEPOS_TEST_HOST_RUNTIME "${DEPOS_TEST_HOST_SYSTEM}-${DEPOS_TEST_HOST_PROCESSOR}")
+  set(DEPOS_SMOKE_STALE_RUNTIME_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/smoke-stale-runtime")
+  set(DEPOS_SMOKE_STALE_RUNTIME_BOOTSTRAP_DIR "${DEPOS_SMOKE_STALE_RUNTIME_BINARY_DIR}/.depos")
+  set(DEPOS_SMOKE_STALE_RUNTIME_BINARY "${DEPOS_SMOKE_STALE_RUNTIME_BOOTSTRAP_DIR}/.tool/${DEPOS_TEST_HOST_RUNTIME}/bin/depos${CMAKE_EXECUTABLE_SUFFIX}")
+  get_filename_component(DEPOS_SMOKE_STALE_RUNTIME_BINARY_PARENT "${DEPOS_SMOKE_STALE_RUNTIME_BINARY}" DIRECTORY)
+  file(MAKE_DIRECTORY "${DEPOS_SMOKE_STALE_RUNTIME_BINARY_PARENT}")
+  file(WRITE "${DEPOS_SMOKE_STALE_RUNTIME_BINARY}" "not a host executable\n")
+  add_test(
+    NAME depos-cmake-stale-local-runtime-is-rebuilt
+    COMMAND
+      "${CMAKE_COMMAND}"
+      --fresh
+      -S "${DEPOS_SMOKE_SOURCE_DIR}"
+      -B "${DEPOS_SMOKE_STALE_RUNTIME_BINARY_DIR}"
+      -DDEPOS_SMOKE_STYLE=all
+      -DDEPOS_BOOTSTRAP_DIR=${DEPOS_SMOKE_STALE_RUNTIME_BOOTSTRAP_DIR}
+      -DDEPOS_ALLOW_SYSTEM_EXECUTABLE=OFF
+      -DDEPOS_CARGO_EXECUTABLE=${DEPOS_TEST_FAKE_CARGO}
+  )
+  set_tests_properties(
+    depos-cmake-stale-local-runtime-is-rebuilt
+    PROPERTIES
+      ENVIRONMENT "DEPOS_TEST_FAKE_CARGO_SOURCE_BINARY=${DEPOS_CLI_OUTPUT_BINARY}"
+      PASS_REGULAR_EXPRESSION "ignoring unusable project-local runtime"
+  )
+
+  set(DEPOS_SMOKE_STALE_EXPLICIT_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/smoke-stale-explicit")
+  set(DEPOS_SMOKE_STALE_EXPLICIT_BINARY "${DEPOS_SMOKE_STALE_EXPLICIT_BINARY_DIR}/depos")
+  file(MAKE_DIRECTORY "${DEPOS_SMOKE_STALE_EXPLICIT_BINARY_DIR}")
+  file(WRITE "${DEPOS_SMOKE_STALE_EXPLICIT_BINARY}" "not a depos executable\n")
+  add_test(
+    NAME depos-cmake-stale-explicit-runtime-is-rejected
+    COMMAND
+      "${CMAKE_COMMAND}"
+      --fresh
+      -S "${DEPOS_SMOKE_SOURCE_DIR}"
+      -B "${DEPOS_SMOKE_STALE_EXPLICIT_BINARY_DIR}/build"
+      -DDEPOS_SMOKE_STYLE=explicit
+      -DDEPOS_EXECUTABLE=${DEPOS_SMOKE_STALE_EXPLICIT_BINARY}
+      -DDEPOS_ROOT=${DEPOS_SMOKE_STALE_EXPLICIT_BINARY_DIR}/depos-root
+  )
+  set_tests_properties(
+    depos-cmake-stale-explicit-runtime-is-rejected
+    PROPERTIES
+      WILL_FAIL TRUE
+  )
+
   set(DEPOS_SMOKE_BOOTSTRAP_ROOT_OVERRIDE_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/tests/smoke-bootstrap-root-override")
   add_test(
     NAME depos-cmake-bootstrap-root-override-configure

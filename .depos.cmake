@@ -51,6 +51,41 @@ function(_depos_make_absolute out_var path_value)
   set(${out_var} "${_depos_absolute}" PARENT_SCOPE)
 endfunction()
 
+function(_depos_normalize_platform_token out_var value)
+  string(TOLOWER "${value}" _depos_token)
+  if (_depos_token STREQUAL "amd64" OR _depos_token STREQUAL "x64")
+    set(_depos_token "x86_64")
+  elseif (_depos_token STREQUAL "arm64")
+    set(_depos_token "aarch64")
+  endif()
+  string(REGEX REPLACE "[^a-z0-9_]+" "-" _depos_token "${_depos_token}")
+  string(REGEX REPLACE "^-+|-+$" "" _depos_token "${_depos_token}")
+  if (_depos_token STREQUAL "")
+    set(_depos_token "unknown")
+  endif()
+  set(${out_var} "${_depos_token}" PARENT_SCOPE)
+endfunction()
+
+function(_depos_host_runtime out_var)
+  set(_depos_host_system "${CMAKE_HOST_SYSTEM_NAME}")
+  set(_depos_host_processor "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+  if (_depos_host_system STREQUAL "" AND NOT CMAKE_HOST_WIN32)
+    execute_process(COMMAND uname -s OUTPUT_VARIABLE _depos_host_system OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  endif()
+  if (_depos_host_processor STREQUAL "" AND NOT CMAKE_HOST_WIN32)
+    execute_process(COMMAND uname -m OUTPUT_VARIABLE _depos_host_processor OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  endif()
+  if (_depos_host_system STREQUAL "" AND CMAKE_HOST_WIN32)
+    set(_depos_host_system "windows")
+  endif()
+  if (_depos_host_processor STREQUAL "" AND DEFINED ENV{PROCESSOR_ARCHITECTURE})
+    set(_depos_host_processor "$ENV{PROCESSOR_ARCHITECTURE}")
+  endif()
+  _depos_normalize_platform_token(_depos_host_system "${_depos_host_system}")
+  _depos_normalize_platform_token(_depos_host_processor "${_depos_host_processor}")
+  set(${out_var} "${_depos_host_system}-${_depos_host_processor}" PARENT_SCOPE)
+endfunction()
+
 _depos_project_defaults_file(_depos_project_defaults)
 if (EXISTS "${_depos_project_defaults}")
   include("${_depos_project_defaults}" OPTIONAL)
@@ -147,7 +182,7 @@ endfunction()
 if (NOT DEFINED DEPOS_BOOTSTRAP_VERSION OR DEPOS_BOOTSTRAP_VERSION STREQUAL "")
   set(
     DEPOS_BOOTSTRAP_VERSION
-    "0.5.5"
+    "0.5.6"
     CACHE STRING
     "Pinned depos version used when bootstrapping locally with Cargo"
   )
@@ -326,11 +361,28 @@ function(depos_registry_dir out_var manifest_path)
 endfunction()
 
 function(_depos_state_file out_var)
-  set(${out_var} "${DEPOS_BOOTSTRAP_DIR}/.state.cmake" PARENT_SCOPE)
+  _depos_host_runtime(_depos_host_runtime)
+  set(${out_var} "${DEPOS_BOOTSTRAP_DIR}/.state-${_depos_host_runtime}.cmake" PARENT_SCOPE)
+endfunction()
+
+function(_depos_host_executable_suffix out_var)
+  _depos_host_runtime(_depos_host_runtime)
+  if (_depos_host_runtime MATCHES "^windows-")
+    set(${out_var} ".exe" PARENT_SCOPE)
+  else()
+    set(${out_var} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(_depos_bootstrap_tool_root out_var)
+  _depos_host_runtime(_depos_host_runtime)
+  set(${out_var} "${DEPOS_BOOTSTRAP_DIR}/.tool/${_depos_host_runtime}" PARENT_SCOPE)
 endfunction()
 
 function(_depos_bootstrap_binary_path out_var)
-  set(${out_var} "${DEPOS_BOOTSTRAP_DIR}/.tool/bin/depos${CMAKE_EXECUTABLE_SUFFIX}" PARENT_SCOPE)
+  _depos_bootstrap_tool_root(_depos_tool_root)
+  _depos_host_executable_suffix(_depos_executable_suffix)
+  set(${out_var} "${_depos_tool_root}/bin/depos${_depos_executable_suffix}" PARENT_SCOPE)
 endfunction()
 
 function(_depos_internal_namespace out_var local_mode)
@@ -364,6 +416,7 @@ endfunction()
 
 function(_depos_write_state executable root local_mode)
   _depos_state_file(_depos_state_file)
+  _depos_host_runtime(_depos_host_runtime)
   file(MAKE_DIRECTORY "${DEPOS_BOOTSTRAP_DIR}")
   if (${local_mode})
     set(_depos_mode "LOCAL")
@@ -379,9 +432,10 @@ function(_depos_write_state executable root local_mode)
   file(APPEND "${_depos_state_file}" "set(DEPOS_STATE_ROOT [==[${root}]==])\n")
   file(APPEND "${_depos_state_file}" "set(DEPOS_STATE_NAMESPACE [==[${_depos_namespace}]==])\n")
   file(APPEND "${_depos_state_file}" "set(DEPOS_STATE_VERSION [==[${DEPOS_BOOTSTRAP_VERSION}]==])\n")
+  file(APPEND "${_depos_state_file}" "set(DEPOS_STATE_HOST_RUNTIME [==[${_depos_host_runtime}]==])\n")
 endfunction()
 
-function(_depos_load_state out_mode out_executable out_root out_namespace out_version)
+function(_depos_load_state out_mode out_executable out_root out_namespace out_version out_host_runtime)
   _depos_state_file(_depos_state_file)
   if (NOT EXISTS "${_depos_state_file}")
     set(${out_mode} "" PARENT_SCOPE)
@@ -389,6 +443,7 @@ function(_depos_load_state out_mode out_executable out_root out_namespace out_ve
     set(${out_root} "" PARENT_SCOPE)
     set(${out_namespace} "" PARENT_SCOPE)
     set(${out_version} "" PARENT_SCOPE)
+    set(${out_host_runtime} "" PARENT_SCOPE)
     return()
   endif()
 
@@ -397,6 +452,7 @@ function(_depos_load_state out_mode out_executable out_root out_namespace out_ve
   unset(DEPOS_STATE_ROOT)
   unset(DEPOS_STATE_NAMESPACE)
   unset(DEPOS_STATE_VERSION)
+  unset(DEPOS_STATE_HOST_RUNTIME)
   include("${_depos_state_file}" OPTIONAL)
 
   set(${out_mode} "${DEPOS_STATE_MODE}" PARENT_SCOPE)
@@ -404,6 +460,31 @@ function(_depos_load_state out_mode out_executable out_root out_namespace out_ve
   set(${out_root} "${DEPOS_STATE_ROOT}" PARENT_SCOPE)
   set(${out_namespace} "${DEPOS_STATE_NAMESPACE}" PARENT_SCOPE)
   set(${out_version} "${DEPOS_STATE_VERSION}" PARENT_SCOPE)
+  set(${out_host_runtime} "${DEPOS_STATE_HOST_RUNTIME}" PARENT_SCOPE)
+endfunction()
+
+function(_depos_probe_runtime out_valid out_reason executable)
+  if (NOT EXISTS "${executable}" OR IS_DIRECTORY "${executable}")
+    set(${out_valid} FALSE PARENT_SCOPE)
+    set(${out_reason} "runtime does not exist: ${executable}" PARENT_SCOPE)
+    return()
+  endif()
+  execute_process(
+    COMMAND "${executable}" --version
+    RESULT_VARIABLE _depos_probe_result
+    OUTPUT_VARIABLE _depos_probe_stdout
+    ERROR_VARIABLE _depos_probe_stderr
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_STRIP_TRAILING_WHITESPACE
+    TIMEOUT 10
+  )
+  if (NOT "${_depos_probe_result}" STREQUAL "0")
+    set(${out_valid} FALSE PARENT_SCOPE)
+    set(${out_reason} "command '${executable} --version' returned '${_depos_probe_result}'; stderr='${_depos_probe_stderr}'" PARENT_SCOPE)
+    return()
+  endif()
+  set(${out_valid} TRUE PARENT_SCOPE)
+  set(${out_reason} "" PARENT_SCOPE)
 endfunction()
 
 function(_depos_cache_runtime executable root local_mode namespace)
@@ -438,7 +519,8 @@ function(_depos_bootstrap_with_cargo out_var)
   endif()
 
   _depos_bootstrap_binary_path(_depos_bootstrap_binary)
-  file(MAKE_DIRECTORY "${DEPOS_BOOTSTRAP_DIR}/.tool")
+  _depos_bootstrap_tool_root(_depos_bootstrap_tool_root)
+  file(MAKE_DIRECTORY "${_depos_bootstrap_tool_root}")
   set(_depos_cargo_command "${_depos_cargo_executable}")
   if (WIN32 AND "${_depos_cargo_executable}" MATCHES "\\.(cmd|bat)$")
     if (DEFINED ENV{COMSPEC} AND NOT "$ENV{COMSPEC}" STREQUAL "")
@@ -459,7 +541,7 @@ function(_depos_bootstrap_with_cargo out_var)
       install
       --locked
       --root
-      "${DEPOS_BOOTSTRAP_DIR}/.tool"
+      "${_depos_bootstrap_tool_root}"
       --version
       "${DEPOS_BOOTSTRAP_VERSION}"
       -j
@@ -481,12 +563,17 @@ function(_depos_bootstrap_with_cargo out_var)
   if (NOT EXISTS "${_depos_bootstrap_binary}")
     message(FATAL_ERROR "cargo install completed but did not produce ${_depos_bootstrap_binary}")
   endif()
+  _depos_probe_runtime(_depos_bootstrap_valid _depos_bootstrap_reason "${_depos_bootstrap_binary}")
+  if (NOT _depos_bootstrap_valid)
+    message(FATAL_ERROR "cargo install produced an unusable depos runtime: ${_depos_bootstrap_reason}")
+  endif()
 
   _depos_copy_interface_locally()
   set(${out_var} "${_depos_bootstrap_binary}" PARENT_SCOPE)
 endfunction()
 
 function(_depos_resolve_runtime out_executable out_root out_local_mode out_namespace)
+  _depos_host_runtime(_depos_current_host_runtime)
   get_property(_depos_cached_executable GLOBAL PROPERTY DEPOS_RESOLVED_EXECUTABLE)
   get_property(_depos_cached_root GLOBAL PROPERTY DEPOS_RESOLVED_ROOT)
   get_property(_depos_cached_local_mode GLOBAL PROPERTY DEPOS_RESOLVED_LOCAL_MODE)
@@ -504,8 +591,9 @@ function(_depos_resolve_runtime out_executable out_root out_local_mode out_names
 
   if (DEFINED DEPOS_EXECUTABLE AND NOT "${DEPOS_EXECUTABLE}" STREQUAL "")
     _depos_make_absolute(_depos_executable "${DEPOS_EXECUTABLE}")
-    if (NOT EXISTS "${_depos_executable}" OR IS_DIRECTORY "${_depos_executable}")
-      message(FATAL_ERROR "DEPOS_EXECUTABLE must point to an existing depos binary: ${_depos_executable}")
+    _depos_probe_runtime(_depos_explicit_valid _depos_explicit_reason "${_depos_executable}")
+    if (NOT _depos_explicit_valid)
+      message(FATAL_ERROR "DEPOS_EXECUTABLE is not a usable depos runtime: ${_depos_explicit_reason}")
     endif()
     _depos_effective_root(_depos_root FALSE)
     _depos_visible_namespace(_depos_namespace FALSE)
@@ -522,6 +610,10 @@ function(_depos_resolve_runtime out_executable out_root out_local_mode out_names
   if (DEFINED DEPOS_ROOT AND NOT "${DEPOS_ROOT}" STREQUAL "" AND DEPOS_ALLOW_SYSTEM_EXECUTABLE)
     find_program(_depos_from_path depos)
     if (_depos_from_path)
+      _depos_probe_runtime(_depos_path_valid _depos_path_reason "${_depos_from_path}")
+      if (NOT _depos_path_valid)
+        message(FATAL_ERROR "depos from PATH is not a usable runtime: ${_depos_path_reason}")
+      endif()
       _depos_effective_root(_depos_root FALSE)
       _depos_visible_namespace(_depos_namespace FALSE)
       _depos_write_state("${_depos_from_path}" "${_depos_root}" FALSE)
@@ -541,12 +633,21 @@ function(_depos_resolve_runtime out_executable out_root out_local_mode out_names
     _depos_state_root
     _depos_state_namespace
     _depos_state_version
+    _depos_state_host_runtime
   )
   _depos_effective_root(_depos_requested_local_root TRUE)
   if ("${_depos_state_mode}" STREQUAL "LOCAL"
       AND "${_depos_state_version}" STREQUAL "${DEPOS_BOOTSTRAP_VERSION}"
+      AND "${_depos_state_host_runtime}" STREQUAL "")
+    _depos_status("ignoring legacy unqualified runtime state; host-qualified bootstrap is required")
+  elseif ("${_depos_state_mode}" STREQUAL "LOCAL"
+      AND "${_depos_state_version}" STREQUAL "${DEPOS_BOOTSTRAP_VERSION}"
       AND "${_depos_state_root}" STREQUAL "${_depos_requested_local_root}"
-      AND EXISTS "${_depos_state_executable}")
+      AND "${_depos_state_host_runtime}" STREQUAL "${_depos_current_host_runtime}")
+    _depos_probe_runtime(_depos_state_valid _depos_state_reason "${_depos_state_executable}")
+    if (NOT _depos_state_valid)
+      _depos_status("ignoring unusable cached runtime state: ${_depos_state_reason}")
+    else()
     _depos_cache_runtime(
       "${_depos_state_executable}"
       "${_depos_state_root}"
@@ -559,10 +660,12 @@ function(_depos_resolve_runtime out_executable out_root out_local_mode out_names
     set(${out_local_mode} TRUE PARENT_SCOPE)
     set(${out_namespace} "${_depos_state_namespace}" PARENT_SCOPE)
     return()
+    endif()
   endif()
 
   _depos_bootstrap_binary_path(_depos_bootstrap_binary)
-  if (EXISTS "${_depos_bootstrap_binary}")
+  _depos_probe_runtime(_depos_bootstrap_valid _depos_bootstrap_reason "${_depos_bootstrap_binary}")
+  if (_depos_bootstrap_valid)
     _depos_effective_root(_depos_root TRUE)
     _depos_visible_namespace(_depos_namespace TRUE)
     _depos_write_state("${_depos_bootstrap_binary}" "${_depos_root}" TRUE)
@@ -573,6 +676,8 @@ function(_depos_resolve_runtime out_executable out_root out_local_mode out_names
     set(${out_local_mode} TRUE PARENT_SCOPE)
     set(${out_namespace} "${_depos_namespace}" PARENT_SCOPE)
     return()
+  elseif (EXISTS "${_depos_bootstrap_binary}")
+    _depos_status("ignoring unusable project-local runtime: ${_depos_bootstrap_reason}")
   endif()
 
   if (NOT DEPOS_ALLOW_CARGO_BOOTSTRAP)
