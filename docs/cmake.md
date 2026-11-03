@@ -102,7 +102,7 @@ dependencies, which `depos` now discovers and cascades during the same resolutio
 If you want repo-local defaults without hardcoding them in `CMakeLists.txt`, add `depos.project.cmake` next to `.depos.cmake`:
 
 ```cmake
-set(DEPOS_BOOTSTRAP_VERSION "0.5.6" CACHE STRING "Pinned depos version used by this project" FORCE)
+set(DEPOS_BOOTSTRAP_VERSION "0.5.7" CACHE STRING "Pinned depos version used by this project" FORCE)
 ```
 
 Useful knobs:

@@ -2476,13 +2476,26 @@ fn copy_host_staged_directory_contents(
 
 #[cfg(target_os = "linux")]
 fn restore_host_staged_modified_time(destination: &Path, metadata: &fs::Metadata) -> Result<()> {
-    let modified = metadata
-        .modified()
-        .with_context(|| format!("failed to read modification time for {}", destination.display()))?;
+    let modified = metadata.modified().with_context(|| {
+        format!(
+            "failed to read modification time for {}",
+            destination.display()
+        )
+    })?;
     fs::File::open(destination)
-        .with_context(|| format!("failed to open {} to restore modification time", destination.display()))?
+        .with_context(|| {
+            format!(
+                "failed to open {} to restore modification time",
+                destination.display()
+            )
+        })?
         .set_times(fs::FileTimes::new().set_modified(modified))
-        .with_context(|| format!("failed to restore modification time for {}", destination.display()))
+        .with_context(|| {
+            format!(
+                "failed to restore modification time for {}",
+                destination.display()
+            )
+        })
 }
 
 #[cfg(target_os = "linux")]
@@ -2583,8 +2596,7 @@ mod host_staged_snapshot_tests {
         assert_eq!(modified(&destination.join("m4")), input_time);
         assert_eq!(modified(&destination), input_time);
         assert!(
-            modified(&destination.join("aclocal.m4"))
-                > modified(&destination.join("configure.ac")),
+            modified(&destination.join("aclocal.m4")) > modified(&destination.join("configure.ac")),
             "the shipped generated file must remain newer than its Autotools inputs"
         );
     }
@@ -9274,6 +9286,27 @@ fn global_target_lookup(selected: &[ResolvedPackage]) -> BTreeMap<String, Option
     lookup
 }
 
+fn global_object_target_lookup(selected: &[ResolvedPackage]) -> BTreeMap<String, String> {
+    let mut lookup = BTreeMap::new();
+    for package in selected {
+        for (target_index, target) in package.spec.targets.iter().enumerate() {
+            if target.object_path.is_none() {
+                continue;
+            }
+            let object_internal =
+                internal_target_component_name(package, target_index, TargetPublicRole::Object);
+            for (public_name, internal_name) in
+                public_target_bindings(package, target, target_index)
+            {
+                if internal_name == object_internal {
+                    lookup.insert(public_name, internal_name);
+                }
+            }
+        }
+    }
+    lookup
+}
+
 fn render_targets_cmake(
     depos_root: &Path,
     variant: &str,
@@ -9282,6 +9315,7 @@ fn render_targets_cmake(
 ) -> Result<String> {
     let dependency_links = dependency_primary_targets(selected);
     let target_lookup = global_target_lookup(selected);
+    let object_target_lookup = global_object_target_lookup(selected);
     ensure_public_target_collisions(selected)?;
     let mut output = String::new();
     output.push_str("include_guard(GLOBAL)\n");
@@ -9305,6 +9339,7 @@ fn render_targets_cmake(
             .cloned()
             .collect::<Vec<_>>();
         let mut package_targets = BTreeMap::new();
+        let mut package_object_targets = BTreeMap::new();
         for (index, target) in package.spec.targets.iter().enumerate() {
             package_targets.insert(
                 target.name.clone(),
@@ -9327,10 +9362,12 @@ fn render_targets_cmake(
                 );
             }
             if target.object_path.is_some() {
-                package_targets.insert(
-                    public_target_component_name(&target.name, TargetPublicRole::Object),
-                    internal_target_component_name(package, index, TargetPublicRole::Object),
-                );
+                let object_name =
+                    public_target_component_name(&target.name, TargetPublicRole::Object);
+                let object_internal =
+                    internal_target_component_name(package, index, TargetPublicRole::Object);
+                package_targets.insert(object_name.clone(), object_internal.clone());
+                package_object_targets.insert(object_name, object_internal);
             }
         }
 
@@ -9345,15 +9382,21 @@ fn render_targets_cmake(
                 .map(|path| display_path(&package_root.join(path)))
                 .collect::<Vec<_>>();
             let mut interface_links = dependency_targets.clone();
-            interface_links.extend(target.link_libraries.iter().map(|item| {
+            for item in &target.link_libraries {
                 if let Some(internal_name) = package_targets.get(item) {
-                    internal_name.clone()
+                    interface_links.push(internal_name.clone());
+                    if let Some(object_name) = package_object_targets.get(item) {
+                        interface_links.push(cmake_target_objects(object_name));
+                    }
                 } else if let Some(Some(internal_name)) = target_lookup.get(item) {
-                    internal_name.clone()
+                    interface_links.push(internal_name.clone());
+                    if let Some(object_name) = object_target_lookup.get(item) {
+                        interface_links.push(cmake_target_objects(object_name));
+                    }
                 } else {
-                    item.clone()
+                    interface_links.push(item.clone());
                 }
-            }));
+            }
             interface_links = dedup_strings(interface_links);
 
             output.push_str(&format!("if (NOT TARGET {})\n", interface_internal));
@@ -9426,7 +9469,7 @@ fn render_targets_cmake(
                     continue;
                 };
                 let artifact_internal = internal_target_component_name(package, target_index, role);
-                artifact_targets.push(artifact_internal.clone());
+                artifact_targets.push((kind, artifact_internal.clone()));
                 output.push_str(&format!("if (NOT TARGET {})\n", artifact_internal));
                 output.push_str(&format!(
                     "  add_library({} {} IMPORTED GLOBAL)\n",
@@ -9462,7 +9505,10 @@ fn render_targets_cmake(
             ));
             let base_links = match artifact_targets.as_slice() {
                 [] => vec![interface_internal.clone()],
-                [only] => vec![only.clone()],
+                [(TargetKind::Object, only)] => {
+                    vec![only.clone(), cmake_target_objects(only)]
+                }
+                [(_, only)] => vec![only.clone()],
                 _ => vec![interface_internal.clone()],
             };
             if !base_links.is_empty() {
@@ -9492,6 +9538,10 @@ fn render_targets_cmake(
     }
 
     Ok(output)
+}
+
+fn cmake_target_objects(target: &str) -> String {
+    format!("$<TARGET_OBJECTS:{target}>")
 }
 
 fn render_lock_cmake(

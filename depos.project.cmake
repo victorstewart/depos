@@ -5,7 +5,7 @@ if (NOT DEFINED DEPOS_BOOTSTRAP_VERSION OR DEPOS_BOOTSTRAP_VERSION STREQUAL "")
   # A source checkout bootstraps with the last published release, never itself.
   set(
     DEPOS_BOOTSTRAP_VERSION
-    "0.5.5"
+    "0.5.6"
     CACHE STRING
     "Pinned depos version used by this project"
     FORCE

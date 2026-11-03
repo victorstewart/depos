@@ -56,6 +56,7 @@ set "crate="
 if "%~1"=="" goto after
 if "%~1"=="install" shift & goto loop
 if "%~1"=="--locked" shift & goto loop
+if "%~1"=="--force" shift & goto loop
 if "%~1"=="--root" (
   set "root=%~2"
   shift
@@ -104,7 +105,7 @@ version=""
 crate=""
 while (($#)); do
   case "$1" in
-    install|--locked)
+    install|--locked|--force)
       shift
       ;;
     --root)

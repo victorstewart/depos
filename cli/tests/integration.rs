@@ -1066,7 +1066,7 @@ fn sync_injects_pkg_config_libdir_for_autoconf_dependencies() {
     sandbox.write(
         "depofiles/local/autoconf_pkg_config_demo/release/1.0.0/main.DepoFile",
         &format!(
-            "NAME autoconf_pkg_config_demo\nVERSION 1.0.0\nSYSTEM_LIBS ALLOW\nDEPENDS dependency_demo VERSION 1.0.0\nBUILD_SYSTEM AUTOCONF\nSOURCE GIT {} HEAD\nAUTOCONF_CONFIGURE_SH <<'EOF'\nexpected=\"/depos/dependency_demo/release/1.0.0/lib/pkgconfig:/depos/dependency_demo/release/1.0.0/lib64/pkgconfig\"\ntest \"$PKG_CONFIG_LIBDIR\" = \"$expected\"\n./configure --prefix=\"$DEPO_PREFIX\" --libdir=\"$DEPO_PREFIX/lib\"\nEOF\nTARGET autoconf_pkg_config_demo::autoconf_pkg_config_demo STATIC lib/libautoconf_pkg_config_demo.a INTERFACE include\n",
+            "NAME autoconf_pkg_config_demo\nVERSION 1.0.0\nSYSTEM_LIBS ALLOW\nDEPENDS dependency_demo VERSION 1.0.0\nBUILD_SYSTEM AUTOCONF\nSOURCE GIT {} HEAD\nAUTOCONF_CONFIGURE_SH <<'EOF'\nexpected=\"$DEPO_DEP_DEPENDENCY_DEMO_RELEASE_ROOT/lib/pkgconfig:$DEPO_DEP_DEPENDENCY_DEMO_RELEASE_ROOT/lib64/pkgconfig\"\ntest \"$PKG_CONFIG_LIBDIR\" = \"$expected\"\n./configure --prefix=\"$DEPO_PREFIX\" --libdir=\"$DEPO_PREFIX/lib\"\nEOF\nTARGET autoconf_pkg_config_demo::autoconf_pkg_config_demo STATIC lib/libautoconf_pkg_config_demo.a INTERFACE include\n",
             upstream.display()
         ),
     );
@@ -1263,6 +1263,62 @@ fn sync_emits_target_specific_link_libraries() {
         1,
         "{targets}"
     );
+}
+
+#[test]
+fn sync_expands_object_target_links_to_object_files() {
+    let sandbox = Sandbox::new();
+    let mimalloc_repo =
+        sandbox.create_git_repo("repos/mimalloc", &[("lib/mimalloc.o", "object\n")]);
+    let basics_repo = sandbox.create_git_repo(
+        "repos/basics",
+        &[("include/basics/basics.h", "// basics\n")],
+    );
+    sandbox.write(
+        "tmp/mimalloc.DepoFile",
+        &format!(
+            "NAME mimalloc\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nTARGET mimalloc::mimalloc OBJECT lib/mimalloc.o\n",
+            mimalloc_repo.display()
+        ),
+    );
+    sandbox.write(
+        "tmp/basics.DepoFile",
+        &format!(
+            "NAME basics\nVERSION 1.0.0\nSOURCE GIT {} HEAD\nDEPENDS mimalloc VERSION 1.0.0\nTARGET basics::basics INTERFACE include\nLINK basics::basics mimalloc::mimalloc::object\n",
+            basics_repo.display()
+        ),
+    );
+    sandbox.write(
+        "manifests/basics.cmake",
+        "depos_require(basics VERSION 1.0.0)\n",
+    );
+
+    for name in ["mimalloc", "basics"] {
+        register_depofile(&RegisterOptions {
+            depos_root: sandbox.depos_root(),
+            file: sandbox.depos_root().join(format!("tmp/{name}.DepoFile")),
+            namespace: RELEASE_NAMESPACE.to_string(),
+        })
+        .expect("register object-link package");
+    }
+
+    let output = sync_registry(&SyncOptions {
+        depos_root: sandbox.depos_root(),
+        manifest: sandbox.depos_root().join("manifests/basics.cmake"),
+        executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_depos"))),
+    })
+    .expect("sync should emit object target links");
+
+    let targets = fs::read_to_string(output.targets_file).expect("targets.cmake should exist");
+    let object_target = "_depos_mimalloc_release_1_0_0_t0__object";
+    assert!(targets.contains("IMPORTED_OBJECTS \""));
+    assert!(targets.contains("/mimalloc/release/1.0.0/lib/mimalloc.o\""));
+    assert!(targets.contains(&format!(
+        "INTERFACE_LINK_LIBRARIES \"{object_target};$<TARGET_OBJECTS:{object_target}>\""
+    )));
+    assert!(targets.contains(&format!(
+        "INTERFACE_LINK_LIBRARIES \"_depos_mimalloc_release_1_0_0_t0;{object_target};$<TARGET_OBJECTS:{object_target}>\""
+    )));
 }
 
 #[test]
@@ -3697,12 +3753,12 @@ fn cmake_source_library_matrix_cascades_dependencies() {
             configure_build_and_test_cmake(&library_repo, &build_dir, &definitions, &envs);
 
             assert!(
-                library_repo.join(".depos/.state.cmake").exists(),
+                library_repo.join(cmake_host_state_relative_path()).exists(),
                 "missing state for scenario {scenario}"
             );
             if resolution_mode == "bootstrap" {
                 assert!(
-                    library_repo.join(".depos/.tool/bin/depos").exists(),
+                    library_repo.join(cmake_host_tool_relative_path()).exists(),
                     "missing bootstrapped binary for scenario {scenario}"
                 );
                 assert!(
@@ -3711,7 +3767,7 @@ fn cmake_source_library_matrix_cascades_dependencies() {
                 );
             } else {
                 assert!(
-                    !library_repo.join(".depos/.tool/bin/depos").exists(),
+                    !library_repo.join(cmake_host_tool_relative_path()).exists(),
                     "unexpected bootstrapped binary for explicit scenario {scenario}"
                 );
             }
@@ -3768,12 +3824,14 @@ fn cmake_depofile_consumer_matrix_cascades_transitive_dependencies() {
             configure_build_and_test_cmake(&consumer_root, &build_dir, &definitions, &envs);
 
             assert!(
-                consumer_root.join(".depos/.state.cmake").exists(),
+                consumer_root
+                    .join(cmake_host_state_relative_path())
+                    .exists(),
                 "missing consumer state for scenario {scenario}"
             );
             if resolution_mode == "bootstrap" {
                 assert!(
-                    consumer_root.join(".depos/.tool/bin/depos").exists(),
+                    consumer_root.join(cmake_host_tool_relative_path()).exists(),
                     "missing bootstrapped binary for consumer scenario {scenario}"
                 );
                 assert!(
@@ -3782,7 +3840,7 @@ fn cmake_depofile_consumer_matrix_cascades_transitive_dependencies() {
                 );
             } else {
                 assert!(
-                    !consumer_root.join(".depos/.tool/bin/depos").exists(),
+                    !consumer_root.join(cmake_host_tool_relative_path()).exists(),
                     "unexpected bootstrapped binary for explicit consumer scenario {scenario}"
                 );
             }
@@ -4072,9 +4130,21 @@ fn cmake_bootstrap_reads_repo_local_project_defaults() {
     );
 
     assert!(output.contains("depos: bootstrapping depos 9.9.9 locally with cargo install"));
-    let state = fs::read_to_string(project_root.join(".depos/.state.cmake"))
+    let state = fs::read_to_string(project_root.join(cmake_host_state_relative_path()))
         .expect("read bootstrapped project state");
     assert!(state.contains("DEPOS_STATE_VERSION [==[9.9.9]==]"));
+}
+
+fn cmake_host_runtime() -> String {
+    format!("linux-{}", std::env::consts::ARCH)
+}
+
+fn cmake_host_state_relative_path() -> PathBuf {
+    PathBuf::from(format!(".depos/.state-{}.cmake", cmake_host_runtime()))
+}
+
+fn cmake_host_tool_relative_path() -> PathBuf {
+    PathBuf::from(format!(".depos/.tool/{}/bin/depos", cmake_host_runtime()))
 }
 
 fn cmake_resolution_env(
@@ -4180,7 +4250,7 @@ fn create_fake_cargo_dir_with_version(sandbox: &Sandbox, relative: &str, version
     fs::write(
         &cargo,
         format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\n\nif [[ \"${{1:-}}\" != \"install\" ]]; then\n  echo \"unexpected cargo invocation: $*\" >&2\n  exit 1\nfi\n\nroot=\"\"\nversion=\"\"\ncrate=\"\"\nwhile (($#)); do\n  case \"$1\" in\n    install|--locked)\n      shift\n      ;;\n    --root)\n      root=\"$2\"\n      shift 2\n      ;;\n    --version)\n      version=\"$2\"\n      shift 2\n      ;;\n    -j)\n      shift 2\n      ;;\n    depos)\n      crate=\"$1\"\n      shift\n      ;;\n    *)\n      echo \"unexpected cargo argument: $1\" >&2\n      exit 1\n      ;;\n  esac\ndone\n\ntest -n \"$root\"\ntest \"$version\" = \"{}\"\ntest \"$crate\" = \"depos\"\nmkdir -p \"$root/bin\"\ncp '{}' \"$root/bin/depos\"\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\n\nif [[ \"${{1:-}}\" != \"install\" ]]; then\n  echo \"unexpected cargo invocation: $*\" >&2\n  exit 1\nfi\n\nroot=\"\"\nversion=\"\"\ncrate=\"\"\nwhile (($#)); do\n  case \"$1\" in\n    install|--locked|--force)\n      shift\n      ;;\n    --root)\n      root=\"$2\"\n      shift 2\n      ;;\n    --version)\n      version=\"$2\"\n      shift 2\n      ;;\n    -j)\n      shift 2\n      ;;\n    depos)\n      crate=\"$1\"\n      shift\n      ;;\n    *)\n      echo \"unexpected cargo argument: $1\" >&2\n      exit 1\n      ;;\n  esac\ndone\n\ntest -n \"$root\"\ntest \"$version\" = \"{}\"\ntest \"$crate\" = \"depos\"\nmkdir -p \"$root/bin\"\ncp '{}' \"$root/bin/depos\"\n",
             version,
             env!("CARGO_BIN_EXE_depos")
         ),
