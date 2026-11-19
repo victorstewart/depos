@@ -34,6 +34,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cargo rustc cmake meson ninja-build qemu-user-binfmt umoci
+          # Ubuntu's qemu-user binaries are static. Metalor 0.3.2 looks them up by their older names.
+          qemu_bin="$RUNNER_TEMP/depos-qemu-bin"
+          mkdir -p "$qemu_bin"
+          for arch in aarch64 riscv64 x86_64; do
+            ln -s "$(command -v "qemu-$arch")" "$qemu_bin/qemu-$arch-static"
+          done
+          echo "$qemu_bin" >> "$GITHUB_PATH"
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0 || true
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
