@@ -2401,13 +2401,26 @@ fn copy_host_staged_directory_contents(
 
 #[cfg(target_os = "linux")]
 fn restore_host_staged_modified_time(destination: &Path, metadata: &fs::Metadata) -> Result<()> {
-    let modified = metadata
-        .modified()
-        .with_context(|| format!("failed to read modification time for {}", destination.display()))?;
+    let modified = metadata.modified().with_context(|| {
+        format!(
+            "failed to read modification time for {}",
+            destination.display()
+        )
+    })?;
     fs::File::open(destination)
-        .with_context(|| format!("failed to open {} to restore modification time", destination.display()))?
+        .with_context(|| {
+            format!(
+                "failed to open {} to restore modification time",
+                destination.display()
+            )
+        })?
         .set_times(fs::FileTimes::new().set_modified(modified))
-        .with_context(|| format!("failed to restore modification time for {}", destination.display()))
+        .with_context(|| {
+            format!(
+                "failed to restore modification time for {}",
+                destination.display()
+            )
+        })
 }
 
 #[cfg(target_os = "linux")]
@@ -2508,8 +2521,7 @@ mod host_staged_snapshot_tests {
         assert_eq!(modified(&destination.join("m4")), input_time);
         assert_eq!(modified(&destination), input_time);
         assert!(
-            modified(&destination.join("aclocal.m4"))
-                > modified(&destination.join("configure.ac")),
+            modified(&destination.join("aclocal.m4")) > modified(&destination.join("configure.ac")),
             "the shipped generated file must remain newer than its Autotools inputs"
         );
     }
@@ -4300,7 +4312,10 @@ fn download_and_publish_url_archive(
             }
         }
         validate_archive_entries(&temporary)?;
-        fs::File::open(&temporary)
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temporary)
             .with_context(|| format!("failed to open downloaded archive {}", temporary.display()))?
             .sync_all()
             .with_context(|| {
